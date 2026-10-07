@@ -1,0 +1,5 @@
+.build/
+.swiftpm/
+Fontso.app
+.DS_Store
+*.xcuserstate
