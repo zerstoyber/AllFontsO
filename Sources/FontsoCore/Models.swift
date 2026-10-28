@@ -209,7 +209,7 @@ public struct FontFace: Identifiable, Hashable, Sendable {
     }
 
     public var canDeactivate: Bool {
-        activation.isAvailableToApps && !SystemFontLocations.isProtected(filePath)
+        activation.isAvailableToApps && !SystemFontLocations.isProtected(normalized: filePath)
     }
 
     public var scriptLabel: String {
@@ -238,7 +238,8 @@ public enum TrialMark {
         let scalars = value.unicodeScalars
         var index = scalars.startIndex
         while index < scalars.endIndex {
-            if let end = trialEnd(in: scalars, from: index) {
+            let first = scalars[index].value
+            if first == 116 || first == 84, let end = trialEnd(in: scalars, from: index) {
                 let before = index == scalars.startIndex ? nil : scalars[scalars.index(before: index)]
                 let after = end == scalars.endIndex ? nil : scalars[end]
                 if separatesBefore(before, start: scalars[index]) && separatesAfter(after) {
@@ -250,10 +251,11 @@ public enum TrialMark {
         return false
     }
 
+    private static let trialLetters: [UInt32] = [116, 114, 105, 97, 108]
+
     private static func trialEnd(in scalars: String.UnicodeScalarView, from start: String.UnicodeScalarIndex) -> String.UnicodeScalarIndex? {
-        let letters: [UInt32] = [116, 114, 105, 97, 108]
         var index = start
-        for expected in letters {
+        for expected in trialLetters {
             guard index < scalars.endIndex else { return nil }
             let value = scalars[index].value
             let folded = (value >= 65 && value <= 90) ? value + 32 : value

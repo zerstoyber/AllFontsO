@@ -3,7 +3,7 @@ import FontsoCore
 import SwiftUI
 
 struct ShapeView: View {
-    @EnvironmentObject private var store: LibraryStore
+    @Environment(LibraryStore.self) private var store
     @AppStorage("fontso.sampleText") private var sample = SpecimenText.standard
     @AppStorage("fontso.listSampleSize") private var sampleSize = 16.0
     @AppStorage("fontso.shapeSampleOpen") private var sampleOpen = true
@@ -189,6 +189,7 @@ struct ShapeView: View {
                         .controlSize(.small)
                         .font(.caption.monospaced())
                         .disabled(tuning.compareLetters && tuning.letters == preset)
+                        .help("Compare the letters \(preset)")
                     }
                 }
                 Text(tuningNote)
@@ -201,6 +202,7 @@ struct ShapeView: View {
                     }
                     .buttonStyle(.borderless)
                     .controlSize(.small)
+                    .help("Compare all measurements again, without drawn letters")
                 }
             }
         }
@@ -278,6 +280,7 @@ struct ShapeView: View {
             if let selected = store.previewFaces.first, selected.id != referenceID {
                 Button("Use \(selected.family) as reference") { adopt(selected) }
                     .buttonStyle(.borderless)
+                    .help("Search for fonts shaped like \(selected.family)")
             }
         }
         .dropDestination(for: FontDragItem.self) { items, _ in
@@ -408,7 +411,7 @@ struct ShapeView: View {
 
     private func face(_ id: Int64?) -> FontFace? {
         guard let id else { return nil }
-        return store.fonts.first { $0.id == id }
+        return store.face(id: id)
     }
 
     /// Says what the current settings compare for this reference, skipping measurements the file does not carry.
@@ -496,7 +499,7 @@ struct ShapeView: View {
 
     private func loadSearch(applySelection: Bool) {
         guard let search = currentSearch else { return }
-        guard let face = store.fonts.first(where: { $0.identity == search.referenceIdentity }) else { return }
+        guard let face = store.face(identity: search.referenceIdentity) else { return }
         let changed = referenceID != face.id
         referenceID = face.id
         if applySelection, changed || !store.selection.contains(face.id) {

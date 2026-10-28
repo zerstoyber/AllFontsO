@@ -36,7 +36,7 @@ sips -s format png -z 1024 1024 "$src" --out "$iconset/icon_512x512@2x.png" >/de
 iconutil -c icns "$iconset" -o "$root/Support/AppIcon.icns"
 rm -rf "$iconset"
 
-app="$root/Fontso.app"
+app="$root/AllFontsO.app"
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$bin/Fontso" "$app/Contents/MacOS/Fontso"

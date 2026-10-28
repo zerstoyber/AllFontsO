@@ -438,7 +438,7 @@ enum MCPTools {
             return store.groups.map { group in
                 let keys = store.listOrder[group.id] ?? Array(store.membership[group.id, default: []])
                 let names = keys.compactMap { key in
-                    store.fonts.first { $0.identity == key }.map { "\($0.family) \($0.style)" }
+                    store.face(identity: key).map { "\($0.family) \($0.style)" }
                 }
                 let outside = (store.listLinks[group.id] ?? []).map { "\($0.name) (outside, \($0.source))" }
                 let items = names + outside

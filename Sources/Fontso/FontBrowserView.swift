@@ -3,7 +3,7 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 struct FontBrowserView: View {
-    @EnvironmentObject private var store: LibraryStore
+    @Environment(LibraryStore.self) private var store
     @FocusState private var searchFocused: Bool
     @State private var typedQuery = ""
     @State private var fileDropTargeted = false
@@ -172,6 +172,7 @@ struct FontBrowserView: View {
             Button("Clear filters") { store.clearFilters() }
                 .buttonStyle(.borderless)
                 .foregroundStyle(Color.accentColor)
+                .help("Show everything this view holds again")
         }
         .font(.caption)
         .foregroundStyle(Color.accentColor)
@@ -191,6 +192,7 @@ struct FontBrowserView: View {
             Button("Back to your order") { store.backToOwnOrder() }
                 .buttonStyle(.borderless)
                 .foregroundStyle(Color.accentColor)
+                .help("Go back to the order you arranged by hand")
         }
         .font(.caption)
         .foregroundStyle(.secondary)
@@ -223,6 +225,7 @@ struct FontBrowserView: View {
             } actions: {
                 Button("Add folder…") { store.addFolders() }
                     .buttonStyle(.borderedProminent)
+                    .help("Choose a folder with fonts to add to the library")
             }
         } else if store.browseGroups.allSatisfy(\.families.isEmpty) && currentLinks.isEmpty && !(isGroupList && store.query.isEmpty) {
             if store.query.isEmpty {
@@ -367,7 +370,7 @@ struct FontBrowserView: View {
     }
 
     private var fontList: some View {
-            List(selection: $store.selection) {
+            List(selection: Bindable(store).selection) {
                 if case .group(let groupID) = store.filter {
                     Section {
                         if !outsideCollapsed {
@@ -697,7 +700,7 @@ struct FontBrowserView: View {
     private func removal(_ face: FontFace, family: BrowseFamily?) -> (title: String, identities: [String]) {
         guard let family else {
             let identities = store.identitiesForDrag(face, wholeFile: true)
-            let rows = store.fonts.filter { store.selection.contains($0.id) }.count
+            let rows = store.selection.count
             let title = store.selection.contains(face.id) && rows > 1 ? "Remove \(rows) fonts from list" : "Remove from list"
             return (title, identities)
         }
@@ -707,7 +710,7 @@ struct FontBrowserView: View {
         let families = store.browseGroups.flatMap(\.families).filter { store.selection.contains($0.representative.id) }
         var identities = families.flatMap { $0.faces.map(\.identity) }
         let covered = Set(identities)
-        identities += store.fonts.filter { store.selection.contains($0.id) && !covered.contains($0.identity) }.map(\.identity)
+        identities += store.selection.compactMap(store.face(id:)).map(\.identity).filter { !covered.contains($0) }
         let title = families.count > 1 ? "Remove \(families.count) families from list" : "Remove family from list"
         return (title, identities)
     }
@@ -746,7 +749,7 @@ struct FontBrowserView: View {
             Button("Deactivate") { store.deactivate(paths: [face.filePath]) }
         }
         Button("Activate family") {
-            let paths = store.fonts.filter { $0.family == face.family }.map(\.filePath)
+            let paths = store.cuts(in: face.family).filter { $0.family == face.family }.map(\.filePath)
             store.activate(paths: paths)
         }
         Divider()
@@ -803,7 +806,7 @@ struct BarButtonChrome: ViewModifier {
 }
 
 private struct FontRow: View {
-    @EnvironmentObject private var store: LibraryStore
+    @Environment(LibraryStore.self) private var store
     let face: FontFace
     let style: FontSection.RowStyle
     var sample = ""
@@ -898,7 +901,7 @@ private struct FontRow: View {
 }
 
 struct ListColumnBar: View {
-    @EnvironmentObject private var store: LibraryStore
+    @Environment(LibraryStore.self) private var store
     @Environment(\.barLeadingInset) private var barLeadingInset
 
     var body: some View {
@@ -983,11 +986,11 @@ struct ListColumnBar: View {
     private var filterMenu: some View {
         Menu {
             Toggle("Hide trials", isOn: Binding(get: { !store.showTrials }, set: { store.showTrials = !$0 }))
-            Toggle("Only active", isOn: $store.onlyActive)
-            Toggle("Only variable", isOn: $store.onlyVariable)
-            Toggle("Only licensed", isOn: $store.onlyLicensed)
+            Toggle("Only active", isOn: Bindable(store).onlyActive)
+            Toggle("Only variable", isOn: Bindable(store).onlyVariable)
+            Toggle("Only licensed", isOn: Bindable(store).onlyLicensed)
             Divider()
-            Picker("Format", selection: $store.formatFilter) {
+            Picker("Format", selection: Bindable(store).formatFilter) {
                 ForEach(FormatFilter.allCases) { format in
                     Text(format.title).tag(format)
                 }

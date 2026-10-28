@@ -4,7 +4,7 @@ import Foundation
 /// Turns WOFF and WOFF2 into an OpenType file macOS can activate. The original file stays the library identity.
 public enum WebfontUnpacker {
     public static func readablePath(for path: String) -> String {
-        let ext = URL(fileURLWithPath: path).pathExtension.lowercased()
+        let ext = (path as NSString).pathExtension.lowercased()
         guard ext == "woff" || ext == "woff2" else { return path }
         return cachedFont(at: URL(fileURLWithPath: path))?.path ?? path
     }

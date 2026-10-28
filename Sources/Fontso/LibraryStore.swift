@@ -24,93 +24,99 @@ private struct LibrarySnapshot: Sendable {
 }
 
 @MainActor
-final class LibraryStore: ObservableObject {
-    @Published var folders: [FontFolder] = [] { didSet { touchLibrary() } }
-    @Published var fonts: [FontFace] = [] { didSet { if !suppressLibraryTouch { touchLibrary() } } }
-    @Published var selection: Set<Int64> = []
-    @Published var filter: LibraryFilter = .all
-    @Published var sort: LibrarySort
-    @Published var sortAscending: Bool
-    @Published var searchFields: Set<SearchScope>
-    @Published var query = ""
-    @Published var showTrials: Bool
-    // Each filter bumps the library revision, so the grouped list and the counts rebuild along with the visible faces.
-    @Published var onlyActive = false { didSet { touchLibrary() } }
-    @Published var onlyVariable = false { didSet { touchLibrary() } }
-    @Published var onlyLicensed = false { didSet { touchLibrary() } }
-    @Published var formatFilter = FormatFilter.any { didSet { touchLibrary() } }
+@Observable
+final class LibraryStore {
+    var folders: [FontFolder] = [] { didSet { touchLibrary() } }
+    var fonts: [FontFace] = [] {
+        didSet {
+            fontsRevision += 1
+            if !suppressLibraryTouch { touchLibrary() }
+        }
+    }
+    var selection: Set<Int64> = []
+    var filter: LibraryFilter = .all
+    var sort: LibrarySort
+    var sortAscending: Bool
+    var searchFields: Set<SearchScope>
+    var query = ""
+    var showTrials: Bool
+    // Each filter bumps the list revision, so the grouped list rebuilds along with the visible faces.
+    var onlyActive = false { didSet { listRevision += 1 } }
+    var onlyVariable = false { didSet { listRevision += 1 } }
+    var onlyLicensed = false { didSet { listRevision += 1 } }
+    var formatFilter = FormatFilter.any { didSet { listRevision += 1 } }
     /// Project each cut is licensed for, keyed by face identity. Cuts without an entry count as unlicensed.
-    @Published var licenses: [String: String] = [:] { didSet { touchLibrary() } }
-    @Published private(set) var countFamilies = UserDefaults.standard.object(forKey: "fontso.countFamilies") as? Bool ?? true
-    private var librarySort: LibrarySort = .automatic
-    @Published var searchFocusToken = 0
-    @Published var favoriteKeys: Set<String> = [] { didSet { touchLibrary() } }
-    @Published var notes: [String: String] = [:]
-    @Published var standardMembership: [String: Set<FontCategory>] = [:] { didSet { touchLibrary() } }
-    @Published var groups: [FontGroup] = [] {
+    var licenses: [String: String] = [:] { didSet { touchLibrary() } }
+    private(set) var countFamilies = UserDefaults.standard.object(forKey: "fontso.countFamilies") as? Bool ?? true
+    @ObservationIgnored private var librarySort: LibrarySort = .automatic
+    var searchFocusToken = 0
+    var favoriteKeys: Set<String> = [] { didSet { touchLibrary() } }
+    var notes: [String: String] = [:]
+    var standardMembership: [String: Set<FontCategory>] = [:] { didSet { touchLibrary() } }
+    var groups: [FontGroup] = [] {
         didSet {
             scopeCache = [:]
             touchLibrary()
         }
     }
-    @Published var listLinks: [Int64: [OutsideFont]] = [:]
-    @Published var membership: [Int64: Set<String>] = [:] { didSet { touchLibrary() } }
-    @Published var listOrder: [Int64: [String]] = [:]
-    @Published var showNewGroup = false
-    @Published var newGroupName = ""
+    var listLinks: [Int64: [OutsideFont]] = [:]
+    var membership: [Int64: Set<String>] = [:] { didSet { touchLibrary() } }
+    var listOrder: [Int64: [String]] = [:]
+    var showNewGroup = false
+    var newGroupName = ""
     /// The list a new list goes into; 0 for the top level.
-    @Published var newGroupParent: Int64 = 0
+    var newGroupParent: Int64 = 0
     /// Lists whose sub-lists are folded away in the sidebar.
-    @Published var collapsedGroups: Set<Int64> = LibraryStore.loadCollapsedGroups() {
+    var collapsedGroups: Set<Int64> = LibraryStore.loadCollapsedGroups() {
         didSet {
             UserDefaults.standard.set(collapsedGroups.map { NSNumber(value: $0) }, forKey: "fontso.collapsedGroups")
         }
     }
-    private var scopeCache: [Int64: [Int64]] = [:]
-    @Published var groupPendingRename: FontGroup?
-    @Published var renameGroupName = ""
-    @Published var isScanning = false
-    @Published var isLibraryReady = false
-    @Published var scanCompleted = 0
-    @Published var scanTotal = 0
-    @Published var scanFileName = ""
-    @Published var statusText = ""
-    @Published var alertMessage: String?
-    @Published var previewExpanded = false
-    @Published var folderPendingRemoval: FontFolder?
-    @Published var researchChats: [ResearchChat] = []
-    @Published var shapeSearches: [ShapeSearch] = []
-    @Published var foundries: [FoundryEntry] = []
-    @Published var foundryFaces: [Int64: [String]] = [:]
-    @Published var notices: [FoundryNotice] = []
-    @Published var newsVisitedAt = Date(timeIntervalSinceReferenceDate: UserDefaults.standard.double(forKey: "fontso.news.visitedAt"))
-    @Published var outsideHits: [OutsideFont] = []
-    @Published var outsideSelection: [OutsideFont] = []
-    @Published var resolvedFontPages: Set<String> = []
-    private var resolvingPages: Set<String> = []
-    @Published var isIndexingFoundries = false
-    @Published var isReadingFoundries = false
-    @Published var foundryIndexNote = ""
-    @Published var showFoundries = false
-    @Published var showReview = false
+    @ObservationIgnored private var scopeCache: [Int64: [Int64]] = [:]
+    var groupPendingRename: FontGroup?
+    var renameGroupName = ""
+    var isScanning = false
+    var isLibraryReady = false
+    var scanCompleted = 0
+    var scanTotal = 0
+    var scanFileName = ""
+    var statusText = ""
+    var alertMessage: String?
+    var previewExpanded = false
+    var folderPendingRemoval: FontFolder?
+    var researchChats: [ResearchChat] = []
+    var shapeSearches: [ShapeSearch] = []
+    var foundries: [FoundryEntry] = []
+    var foundryFaces: [Int64: [String]] = [:]
+    var notices: [FoundryNotice] = []
+    var newsVisitedAt = Date(timeIntervalSinceReferenceDate: UserDefaults.standard.double(forKey: "fontso.news.visitedAt"))
+    var outsideHits: [OutsideFont] = []
+    var outsideSelection: [OutsideFont] = []
+    var resolvedFontPages: Set<String> = []
+    @ObservationIgnored private var resolvingPages: Set<String> = []
+    var isIndexingFoundries = false
+    var isReadingFoundries = false
+    var foundryIndexNote = ""
+    var showFoundries = false
+    var showReview = false
     /// When each cut was last confirmed in Review, keyed by identity.
-    @Published var reviewMarks: [String: Date] = [:]
-    @Published var mcpEnabled = MCPSettings.enabled
-    @Published var mcpPort: UInt16?
-    @Published var mcpError: String?
+    var reviewMarks: [String: Date] = [:]
+    var mcpEnabled = MCPSettings.enabled
+    var mcpPort: UInt16?
+    var mcpError: String?
     private let mcpServer = MCPServer()
-    @Published var titlePending: TitlePending?
-    @Published var renameTitle = ""
-    @Published var researchMessages: [ResearchMessage] = []
-    @Published var researchingChatID: Int64?
+    var titlePending: TitlePending?
+    var renameTitle = ""
+    var researchMessages: [ResearchMessage] = []
+    var researchingChatID: Int64?
     /// A font name dropped onto a chat. The open Research field appends it.
-    @Published var researchReference = ""
-    @Published var compareLists: [FontGroup] = []
-    @Published var compareMembers: [Int64: [String]] = [:] { didSet { touchLibrary() } }
-    @Published var showNewCompare = false
-    @Published var newCompareName = ""
-    @Published var comparePendingRename: FontGroup?
-    @Published var renameCompareName = ""
+    var researchReference = ""
+    var compareLists: [FontGroup] = []
+    var compareMembers: [Int64: [String]] = [:] { didSet { touchLibrary() } }
+    var showNewCompare = false
+    var newCompareName = ""
+    var comparePendingRename: FontGroup?
+    var renameCompareName = ""
 
     var isResearching: Bool {
         if case .research(let id) = filter {
@@ -120,8 +126,8 @@ final class LibraryStore: ObservableObject {
     }
 
     private let database: FontDatabase?
-    private var scanToken = UUID()
-    private var cancelFlag: CancelFlag?
+    @ObservationIgnored private var scanToken = UUID()
+    @ObservationIgnored private var cancelFlag: CancelFlag?
 
     init() {
         let stored = UserDefaults.standard.string(forKey: "fontso.sort") ?? LibrarySort.automatic.rawValue
@@ -217,7 +223,7 @@ final class LibraryStore: ObservableObject {
         let wantLicensed = onlyLicensed
         let format = formatFilter
         func passes(_ face: FontFace) -> Bool {
-            if suppressTrials && face.isTrial { return false }
+            if suppressTrials && isTrial(face) { return false }
             if wantActive && !face.activation.isAvailableToApps { return false }
             if wantVariable && !face.isVariable { return false }
             if wantLicensed && !isLicensed(face) { return false }
@@ -226,11 +232,7 @@ final class LibraryStore: ObservableObject {
         }
         let result: [FontFace]
         if case .compare(let id) = filter {
-            var known: [String: FontFace] = [:]
-            known.reserveCapacity(fonts.count)
-            for face in fonts {
-                known[face.identity] = face
-            }
+            let known = facesKeyedByIdentity
             result = (compareMembers[id] ?? []).compactMap { known[$0] }.filter(passes)
         } else {
             result = fonts.filter { face in
@@ -242,8 +244,8 @@ final class LibraryStore: ObservableObject {
         return result
     }
 
-    private var visibleKey = ""
-    private var visibleCache: [FontFace] = []
+    @ObservationIgnored private var visibleKey = ""
+    @ObservationIgnored private var visibleCache: [FontFace] = []
 
     /// How many of the view's fonts the search and filters currently hide, in the unit the user counts in.
     var filterFootprint: (shown: Int, total: Int) {
@@ -343,7 +345,7 @@ final class LibraryStore: ObservableObject {
     // MARK: - Sidebar order
 
     /// The user's own order for lists, shape searches, and chats in the sidebar. Items without a saved place follow in their natural order.
-    @Published private var sidebarOrder: [String: [Int64]] = LibraryStore.loadSidebarOrder()
+    private var sidebarOrder: [String: [Int64]] = LibraryStore.loadSidebarOrder()
 
     private static let sidebarKinds = ["groups", "shapes", "chats"]
 
@@ -393,6 +395,10 @@ final class LibraryStore: ObservableObject {
 
     /// All lists in sidebar order, parents before their sub-lists, for "Add to list" menus.
     var menuGroups: [FontGroup] {
+        let order = sidebarOrder["groups"] ?? []
+        if menuCacheGroups == groups, menuCacheOrder == order, let cached = menuCache {
+            return cached
+        }
         var result: [FontGroup] = []
         func walk(_ parent: Int64, depth: Int) {
             guard depth < 64 else { return }
@@ -406,8 +412,16 @@ final class LibraryStore: ObservableObject {
         for group in orderedGroups where !result.contains(group) {
             result.append(group)
         }
+        menuCacheGroups = groups
+        menuCacheOrder = order
+        menuCache = result
         return result
     }
+
+    /// Every row's context menu asks for the lists, so they are walked once until the lists change.
+    @ObservationIgnored private var menuCacheGroups: [FontGroup] = []
+    @ObservationIgnored private var menuCacheOrder: [Int64] = []
+    @ObservationIgnored private var menuCache: [FontGroup]?
 
     /// A menu title that shows where a nested list sits: "Client › Web".
     func menuTitle(_ group: FontGroup) -> String {
@@ -500,14 +514,83 @@ final class LibraryStore: ObservableObject {
     }
 
     /// When true, writing `fonts` does not rebuild the grouped list. Used to fill category sources without a hitch.
-    private var suppressLibraryTouch = false
+    @ObservationIgnored private var suppressLibraryTouch = false
     private var listRevision = 0
-    private var browseKey = ""
-    private var browseCache: [BrowseGroup] = []
-    private var browseStyleCount = 0
-    private var browseAvailable = 0
-    private var countToken = ""
-    private var countCache: [LibraryFilter: CountTally] = [:]
+    /// Changes only when `fonts` itself changes, so lookups survive filters, favorites and licenses.
+    private var fontsRevision = 0
+    @ObservationIgnored private var lookupRevision = -1
+    @ObservationIgnored private var facesByIdentity: [String: FontFace] = [:]
+    @ObservationIgnored private var facesByID: [Int64: FontFace] = [:]
+
+    private func refreshLookup() {
+        guard lookupRevision != fontsRevision else { return }
+        var byIdentity: [String: FontFace] = [:]
+        var byID: [Int64: FontFace] = [:]
+        byIdentity.reserveCapacity(fonts.count)
+        byID.reserveCapacity(fonts.count)
+        for face in fonts {
+            byIdentity[face.identity] = face
+            byID[face.id] = face
+        }
+        facesByIdentity = byIdentity
+        facesByID = byID
+        lookupRevision = fontsRevision
+    }
+
+    func face(identity: String) -> FontFace? {
+        refreshLookup()
+        return facesByIdentity[identity]
+    }
+
+    func face(id: Int64) -> FontFace? {
+        refreshLookup()
+        return facesByID[id]
+    }
+
+    func hasFace(identity: String) -> Bool {
+        face(identity: identity) != nil
+    }
+
+    @ObservationIgnored private var byNameRevision = -1
+    @ObservationIgnored private var byNameCache: [FontFace] = []
+
+    /// The library in family, weight and style order, sorted once per library change.
+    var fontsByName: [FontFace] {
+        if byNameRevision != fontsRevision {
+            byNameCache = fonts.sorted { lhs, rhs in
+                let family = lhs.family.localizedStandardCompare(rhs.family)
+                if family != .orderedSame { return family == .orderedAscending }
+                if lhs.weightClass != rhs.weightClass { return lhs.weightClass < rhs.weightClass }
+                return lhs.style.localizedStandardCompare(rhs.style) == .orderedAscending
+            }
+            byNameRevision = fontsRevision
+        }
+        return byNameCache
+    }
+
+    @ObservationIgnored private var trialRevision = -1
+    @ObservationIgnored private var trialIDs: Set<Int64> = []
+
+    /// `FontFace.isTrial` reads five names letter by letter, so the answer is kept per library change.
+    func isTrial(_ face: FontFace) -> Bool {
+        if trialRevision != fontsRevision {
+            trialIDs = Set(fonts.lazy.filter(\.isTrial).map(\.id))
+            trialRevision = fontsRevision
+        }
+        return trialIDs.contains(face.id)
+    }
+
+    /// Every face keyed by identity, built once per library change.
+    var facesKeyedByIdentity: [String: FontFace] {
+        refreshLookup()
+        return facesByIdentity
+    }
+    @ObservationIgnored private var browseKey = ""
+    @ObservationIgnored private var browseCache: [BrowseGroup] = []
+    @ObservationIgnored private var browseStyleCount = 0
+    @ObservationIgnored private var browseAvailable = 0
+    @ObservationIgnored private var countToken = ""
+    @ObservationIgnored private var countCache: [LibraryFilter: CountTally] = [:]
 
     /// Styles and distinct families behind one sidebar number, plus names kept outside the library.
     private struct CountTally {
@@ -516,8 +599,12 @@ final class LibraryStore: ObservableObject {
         var extra = 0
 
         mutating func add(_ face: FontFace) {
+            add(family: face.family.lowercased())
+        }
+
+        mutating func add(family: String) {
             styles += 1
-            families.insert(face.family.lowercased())
+            families.insert(family)
         }
     }
 
@@ -562,8 +649,12 @@ final class LibraryStore: ObservableObject {
         return groups
     }
 
+    /// Bumped with every change to the library's contents; the sidebar counts only rebuild on this one.
+    private var contentRevision = 0
+
     private func touchLibrary() {
         listRevision += 1
+        contentRevision += 1
     }
 
     var filterTitle: String {
@@ -620,12 +711,12 @@ final class LibraryStore: ObservableObject {
         return "\(visibleCount) of \(fonts.count) fonts · \(available) available\(trials)"
     }
 
-    private var previewRevision = -1
-    private var previewSelection: Set<Int64> = []
-    private var previewKey = ""
-    private var previewCache: [FontFace] = []
+    @ObservationIgnored private var previewRevision = -1
+    @ObservationIgnored private var previewSelection: Set<Int64> = []
+    @ObservationIgnored private var previewKey = ""
+    @ObservationIgnored private var previewCache: [FontFace] = []
     /// Families the browser currently shows expanded; mirrored from the list so the preview knows a row means the whole family.
-    @Published var expandedFamilyNames: Set<String> = []
+    var expandedFamilyNames: Set<String> = []
 
     var previewFaces: [FontFace] {
         let key = "\(String(describing: filter))|\(expandedFamilyNames.count)|\(expandedFamilyNames.hashValue)|\(pinnedIdentities.joined(separator: ","))"
@@ -643,7 +734,7 @@ final class LibraryStore: ObservableObject {
         let pinnedSet = Set(pinnedIdentities)
         var pinned: [FontFace] = []
         for identity in pinnedIdentities {
-            if let face = fonts.first(where: { $0.identity == identity }) { pinned.append(face) }
+            if let face = self.face(identity: identity) { pinned.append(face) }
         }
         let faces = pinned + chosen.filter { !pinnedSet.contains($0.identity) }.sorted { lhs, rhs in
             let family = lhs.family.localizedStandardCompare(rhs.family)
@@ -758,9 +849,9 @@ final class LibraryStore: ObservableObject {
         }
     }
 
-    private var isFillingSources = false
+    @ObservationIgnored private var isFillingSources = false
     /// Bumped when sources were filled in, so an open review can re-rank its queue.
-    @Published var reviewSourcesVersion = 0
+    var reviewSourcesVersion = 0
 
     /// Fonts indexed before sources were recorded carry none. Read the deciding metadata once,
     /// quietly in the background, so the review can rank them by certainty.
@@ -824,7 +915,7 @@ final class LibraryStore: ObservableObject {
     // MARK: Pinned preview fonts
 
     /// Fonts that stay in the preview whatever is selected, so other fonts can be browsed against them.
-    @Published var pinnedIdentities: [String] = (UserDefaults.standard.array(forKey: "fontso.pinned") as? [String]) ?? [] {
+    var pinnedIdentities: [String] = (UserDefaults.standard.array(forKey: "fontso.pinned") as? [String]) ?? [] {
         didSet { UserDefaults.standard.set(pinnedIdentities, forKey: "fontso.pinned") }
     }
 
@@ -855,6 +946,14 @@ final class LibraryStore: ObservableObject {
         selection = next
         outsideSelection = []
         return true
+    }
+
+    /// Takes one font out of the preview, unpinning it when pinned; the rest stays.
+    func removeFromPreview(_ face: FontFace) {
+        pinnedIdentities.removeAll { $0 == face.identity }
+        var shown = selection.contains(face.id) ? selection : Set(previewFaces.map(\.id))
+        shown.remove(face.id)
+        selection = shown
     }
 
     /// A variable font file carries every named instance as its own face. In a family preview, each such file is one
@@ -929,7 +1028,7 @@ final class LibraryStore: ObservableObject {
     }
 
     private func refreshCounts() {
-        let token = "\(listRevision)|\(favoriteKeys.count)|\(licenses.count)|\(standardMembership.count)|\(membership.count)|\(folders.count)"
+        let token = "\(contentRevision)|\(favoriteKeys.count)|\(licenses.count)|\(standardMembership.count)|\(membership.count)|\(folders.count)"
         if token != countToken {
             countCache = tallyCounts()
             countToken = token
@@ -938,31 +1037,32 @@ final class LibraryStore: ObservableObject {
 
     private func tallyCounts() -> [LibraryFilter: CountTally] {
         var counts: [LibraryFilter: CountTally] = [:]
-        func note(_ filter: LibraryFilter, _ face: FontFace) {
-            counts[filter, default: CountTally()].add(face)
-        }
+        let folderPrefixes = folders.map { ($0.id, $0.path, $0.path + "/") }
         for face in fonts {
-            note(.all, face)
-            if face.activation.isAvailableToApps { note(.available, face) }
-            if face.activation == .inactive { note(.inactive, face) }
-            if face.isVariable { note(.variable, face) }
-            if face.isWebfont { note(.webfonts, face) } else { note(.desktop, face) }
-            if favoriteKeys.contains(face.identity) { note(.favorites, face) }
-            if isLicensed(face) { note(.licensed, face) }
-            let listed = listedCategories(face)
+            let family = face.family.lowercased()
+            let identity = face.identity
+            func note(_ filter: LibraryFilter) {
+                counts[filter, default: CountTally()].add(family: family)
+            }
+            note(.all)
+            if face.activation.isAvailableToApps { note(.available) }
+            if face.activation == .inactive { note(.inactive) }
+            if face.isVariable { note(.variable) }
+            if face.isWebfont { note(.webfonts) } else { note(.desktop) }
+            if favoriteKeys.contains(identity) { note(.favorites) }
+            if !(licenses[identity] ?? "").isEmpty { note(.licensed) }
+            let listed = standardMembership[identity] ?? listedCategories(face)
             var typed = false
             for category in listed where category != .unclassified {
-                note(.category(category), face)
+                note(.category(category))
                 if category != .trial { typed = true }
             }
-            if !typed { note(.category(.unclassified), face) }
-            for folder in folders where face.filePath == folder.path || face.filePath.hasPrefix(folder.path + "/") {
-                note(.folder(folder.id), face)
+            if !typed { note(.category(.unclassified)) }
+            for (id, path, prefix) in folderPrefixes where face.filePath == path || face.filePath.hasPrefix(prefix) {
+                note(.folder(id))
             }
         }
-        var known: [String: FontFace] = [:]
-        known.reserveCapacity(fonts.count)
-        for face in fonts { known[face.identity] = face }
+        let known = facesKeyedByIdentity
         for group in groups {
             var tally = CountTally()
             var seen: Set<String> = []
@@ -1011,7 +1111,7 @@ final class LibraryStore: ObservableObject {
             if case .folder(let id) = filter, id == folder.id {
                 filter = .all
             }
-            selection = selection.filter { id in fonts.contains { $0.id == id } }
+            selection = selection.filter { face(id: $0) != nil }
             touchLibrary()
         } catch {
             alertMessage = error.localizedDescription
@@ -1271,13 +1371,15 @@ final class LibraryStore: ObservableObject {
                 await MainActor.run {
                     guard self.scanToken == token else { return }
                     var moved = 0
-                    for index in self.fonts.indices {
-                        guard self.fonts[index].category == .unclassified,
-                              let raw = categories[self.fonts[index].family],
+                    var next = self.fonts
+                    for index in next.indices {
+                        guard next[index].category == .unclassified,
+                              let raw = categories[next[index].family],
                               let category = FontCategory(rawValue: raw) else { continue }
-                        self.fonts[index].category = category
+                        next[index].category = category
                         moved += 1
                     }
+                    self.fonts = next
                     self.standardMembership = listed
                     self.touchLibrary()
                     self.isScanning = false
@@ -1441,9 +1543,11 @@ final class LibraryStore: ObservableObject {
     }
 
     private func changeActivation(paths: [String], enable: Bool) {
-        let unique = Array(Set(paths)).filter { path in
+        let requested = Set(paths)
+        let facesByPath = Dictionary(grouping: fonts.filter { requested.contains($0.filePath) }, by: \.filePath)
+        let unique = Array(requested).filter { path in
             if SystemFontLocations.isProtected(path) { return false }
-            let faces = fonts.filter { $0.filePath == path }
+            let faces = facesByPath[path] ?? []
             if enable {
                 return faces.contains { $0.canActivate }
             }
@@ -1457,7 +1561,7 @@ final class LibraryStore: ObservableObject {
         var failures: [String] = []
         for path in unique {
             do {
-                let names = fonts.filter { $0.filePath == path }.map(\.postscriptName)
+                let names = (facesByPath[path] ?? []).map(\.postscriptName)
                 if enable {
                     try FontActivator.activate(filePath: path)
                 } else {
@@ -1488,14 +1592,16 @@ final class LibraryStore: ObservableObject {
     private func refreshActivation(for paths: [String]) {
         let set = Set(paths.map(normalizeFontPath))
         let activeNames = FontActivator.activePostScriptNames()
-        for index in fonts.indices {
-            guard set.contains(fonts[index].filePath) else { continue }
-            fonts[index].activation = FontActivator.availability(
-                filePath: fonts[index].filePath,
-                postScriptName: fonts[index].postscriptName,
-                activeNames: activeNames
-            )
+        var next = fonts
+        let indices = next.indices.filter { set.contains(next[$0].filePath) }
+        let states = FontActivator.availability(
+            libraryFaces: indices.map { (next[$0].filePath, next[$0].postscriptName) },
+            activeNames: activeNames
+        )
+        for (index, state) in zip(indices, states) {
+            next[index].activation = state
         }
+        fonts = next
         touchLibrary()
         let updated = fonts.filter { set.contains($0.filePath) }
         try? database?.updateActivation(updated)
@@ -1554,11 +1660,11 @@ final class LibraryStore: ObservableObject {
         searchFields = next.isEmpty ? [.all] : next
     }
 
-    private var familyIndexRevision = -1
-    private var familyIndex: [String: [FontFace]] = [:]
+    @ObservationIgnored private var familyIndexRevision = -1
+    @ObservationIgnored private var familyIndex: [String: [FontFace]] = [:]
 
     func cuts(in family: String) -> [FontFace] {
-        if familyIndexRevision != listRevision {
+        if familyIndexRevision != fontsRevision {
             var grouped: [String: [FontFace]] = [:]
             grouped.reserveCapacity(fonts.count / 4)
             for face in fonts {
@@ -1572,7 +1678,7 @@ final class LibraryStore: ObservableObject {
                 }
             }
             familyIndex = grouped
-            familyIndexRevision = listRevision
+            familyIndexRevision = fontsRevision
         }
         return familyIndex[family.lowercased()] ?? []
     }
@@ -1732,7 +1838,7 @@ final class LibraryStore: ObservableObject {
     @discardableResult
     func keepShapeReference(_ searchID: Int64, identities: [String]) -> Bool {
         guard let identity = identities.first,
-              let face = fonts.first(where: { $0.identity == identity }),
+              let face = self.face(identity: identity),
               let search = shapeSearches.first(where: { $0.id == searchID }) else { return false }
         let previousTitle = search.title
         let previousQuery = search.query
@@ -1961,16 +2067,16 @@ final class LibraryStore: ObservableObject {
         return Array((known + open).prefix(limit))
     }
 
-    private var knownFamilyToken = -1
-    private var knownFamilyCache: Set<String> = []
+    @ObservationIgnored private var knownFamilyToken = -1
+    @ObservationIgnored private var knownFamilyCache: Set<String> = []
 
     /// Folded family names of everything in the library, cached until the library changes.
     var knownFamilyNames: Set<String> {
-        if knownFamilyToken == listRevision, !knownFamilyCache.isEmpty || fonts.isEmpty {
+        if knownFamilyToken == fontsRevision, !knownFamilyCache.isEmpty || fonts.isEmpty {
             return knownFamilyCache
         }
         knownFamilyCache = Set(fonts.map { foldedName($0.family) })
-        knownFamilyToken = listRevision
+        knownFamilyToken = fontsRevision
         return knownFamilyCache
     }
 
@@ -2313,11 +2419,11 @@ final class LibraryStore: ObservableObject {
     }
 
     func face(forFamily family: String) -> FontFace? {
-        closestFace(in: fonts.filter { $0.family.caseInsensitiveCompare(family) == .orderedSame }, hint: "")
+        closestFace(in: cuts(in: family), hint: "")
     }
 
     func face(forFamily family: String, matching hint: String) -> FontFace? {
-        let matches = fonts.filter { $0.family.caseInsensitiveCompare(family) == .orderedSame }
+        let matches = cuts(in: family)
         let foldedHint = hint.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "de_DE"))
         let hinted = matches.filter { face in
             let style = face.style.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "de_DE"))
@@ -2344,7 +2450,7 @@ final class LibraryStore: ObservableObject {
     }
 
     func focusIdentity(_ identity: String) {
-        guard let face = fonts.first(where: { $0.identity == identity }) else { return }
+        guard let face = self.face(identity: identity) else { return }
         selection = [face.id]
     }
 
@@ -2356,7 +2462,7 @@ final class LibraryStore: ObservableObject {
         if FontCategory.typographic.contains(face.category) {
             set.insert(face.category)
         }
-        if face.isTrial {
+        if isTrial(face) {
             set.insert(.trial)
         }
         return set
@@ -2379,7 +2485,7 @@ final class LibraryStore: ObservableObject {
 
     func toggleStandardList(_ category: FontCategory, for face: FontFace, familyWide: Bool) {
         guard let database else { return }
-        let targets = familyWide ? fonts.filter { $0.family == face.family } : [face]
+        let targets = familyWide ? cuts(in: face.family).filter { $0.family == face.family } : [face]
         let enabled = !isInStandardList(category, face)
         var edits: [(path: String, index: Int, id: Int64, primary: String?)] = []
         var nextLists: [String: Set<FontCategory>] = [:]
@@ -2414,11 +2520,13 @@ final class LibraryStore: ObservableObject {
                 standardMembership[identity] = set
             }
             if !nextPrimary.isEmpty {
-                for index in fonts.indices {
-                    if let category = nextPrimary[fonts[index].id] {
-                        fonts[index].category = category
+                var next = fonts
+                for index in next.indices {
+                    if let category = nextPrimary[next[index].id] {
+                        next[index].category = category
                     }
                 }
+                fonts = next
             }
             touchLibrary()
             if category == .unclassified {
@@ -2780,13 +2888,13 @@ final class LibraryStore: ObservableObject {
         var seen = Set<String>()
         for identity in identities {
             guard seen.insert(identity).inserted,
-                  let face = fonts.first(where: { $0.identity == identity }) else { continue }
+                  let face = self.face(identity: identity) else { continue }
             faces.append(face)
         }
         let grouped = Dictionary(grouping: faces, by: \.family)
         return grouped.keys.sorted { $0.localizedStandardCompare($1) == .orderedAscending }.map { family in
             let cuts = grouped[family] ?? []
-            let familyCount = fonts.filter { $0.family.caseInsensitiveCompare(family) == .orderedSame }.count
+            let familyCount = self.cuts(in: family).count
             if cuts.count > 1 && cuts.count == familyCount {
                 return family
             }
@@ -3079,11 +3187,13 @@ final class LibraryStore: ObservableObject {
     private func applyActivation(_ updates: [FontFace]) {
         guard !updates.isEmpty else { return }
         let byID = Dictionary(uniqueKeysWithValues: updates.map { ($0.id, $0.activation) })
-        for index in fonts.indices {
-            if let activation = byID[fonts[index].id] {
-                fonts[index].activation = activation
+        var next = fonts
+        for index in next.indices {
+            if let activation = byID[next[index].id] {
+                next[index].activation = activation
             }
         }
+        fonts = next
     }
 
     nonisolated private static func url(from item: NSSecureCoding?) -> URL? {
@@ -3145,12 +3255,11 @@ private final class DropBox: @unchecked Sendable {
 }
 
 private func activationUpdates(in faces: [FontFace], activeNames: Set<String>) -> [FontFace] {
-    faces.compactMap { face in
-        let next = FontActivator.availability(
-            filePath: face.filePath,
-            postScriptName: face.postscriptName,
-            activeNames: activeNames
-        )
+    let states = FontActivator.availability(
+        libraryFaces: faces.map { ($0.filePath, $0.postscriptName) },
+        activeNames: activeNames
+    )
+    return zip(faces, states).compactMap { face, next in
         guard next != face.activation else { return nil }
         var copy = face
         copy.activation = next

@@ -12,12 +12,12 @@ enum FontsoEntry {
 }
 
 struct FontsoApp: App {
-    @StateObject private var store = LibraryStore()
+    @State private var store = LibraryStore()
 
     var body: some Scene {
         WindowGroup {
             ContentView()
-                .environmentObject(store)
+                .environment(store)
                 .frame(minWidth: 1100, minHeight: 680)
         }
         // The title bar folds into the first column bar; see TitleBarIntegration.
@@ -29,7 +29,7 @@ struct FontsoApp: App {
         // Its own window, so the library stays in view while families are checked.
         Window("Review", id: "review") {
             ReviewView()
-                .environmentObject(store)
+                .environment(store)
         }
         .defaultSize(width: 760, height: 640)
         .defaultPosition(.center)

@@ -112,11 +112,14 @@ enum FormatFilter: String, CaseIterable, Identifiable {
     }
 
     func admits(_ face: FontFace) -> Bool {
-        let format = face.format.lowercased()
         switch self {
         case .any: return true
-        case .otf: return format == "otf" || format == "otc"
-        case .ttf: return format == "ttf" || format == "ttc"
+        case .otf:
+            let format = face.format.lowercased()
+            return format == "otf" || format == "otc"
+        case .ttf:
+            let format = face.format.lowercased()
+            return format == "ttf" || format == "ttc"
         case .webfont: return face.isWebfont
         }
     }

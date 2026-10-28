@@ -25,20 +25,26 @@ public enum FontActivationError: LocalizedError {
 }
 
 public enum SystemFontLocations {
+    private static let fontFolderRoots: [String] = [
+        FileManager.default.homeDirectoryForCurrentUser.path + "/Library/Fonts",
+        "/Library/Fonts",
+        "/Network/Library/Fonts"
+    ]
+
     public static func isProtected(_ path: String) -> Bool {
-        let normalized = normalizeFontPath(path)
-        return normalized == "/System/Library/Fonts" || normalized.hasPrefix("/System/Library/Fonts/")
+        isProtected(normalized: normalizeFontPath(path))
     }
 
     public static func isFontFolderInstall(_ path: String) -> Bool {
-        let normalized = normalizeFontPath(path)
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let roots = [
-            home + "/Library/Fonts",
-            "/Library/Fonts",
-            "/Network/Library/Fonts"
-        ]
-        return roots.contains { normalized == $0 || normalized.hasPrefix($0 + "/") }
+        isFontFolderInstall(normalized: normalizeFontPath(path))
+    }
+
+    static func isProtected(normalized: String) -> Bool {
+        normalized == "/System/Library/Fonts" || normalized.hasPrefix("/System/Library/Fonts/")
+    }
+
+    static func isFontFolderInstall(normalized: String) -> Bool {
+        fontFolderRoots.contains { normalized == $0 || normalized.hasPrefix($0 + "/") }
     }
 }
 
@@ -132,6 +138,53 @@ public enum FontActivator {
             return .available
         }
         return .inactive
+    }
+
+    /// Same answer as `availability` for library paths, which are already normalized.
+    /// A named style that no app can see is inactive, so Core Text is only asked about the active ones.
+    public static func availability(libraryPath: String, postScriptName: String, activeNames: Set<String>) -> Activation {
+        availability(libraryPath: libraryPath, postScriptName: postScriptName, activeNames: activeNames, registered: isPersistentlyRegistered)
+    }
+
+    /// Checks many library faces at once. Faces that share a file ask the font registry about it only once.
+    public static func availability(libraryFaces faces: [(path: String, postScriptName: String)], activeNames: Set<String>) -> [Activation] {
+        var known: [String: Bool] = [:]
+        func registered(_ path: String) -> Bool {
+            if let cached = known[path] { return cached }
+            let value = isPersistentlyRegistered(path)
+            known[path] = value
+            return value
+        }
+        return faces.map { face in
+            availability(libraryPath: face.path, postScriptName: face.postScriptName, activeNames: activeNames, registered: registered)
+        }
+    }
+
+    private static func availability(
+        libraryPath: String,
+        postScriptName: String,
+        activeNames: Set<String>,
+        registered: (String) -> Bool
+    ) -> Activation {
+        if SystemFontLocations.isProtected(normalized: libraryPath) {
+            return .installed
+        }
+        if !postScriptName.isEmpty && !activeNames.contains(postScriptName) {
+            return .inactive
+        }
+        let path = WebfontUnpacker.readablePath(for: libraryPath)
+        if SystemFontLocations.isProtected(normalized: path) {
+            return .installed
+        }
+        let folderInstall = SystemFontLocations.isFontFolderInstall(normalized: path)
+        if registered(path) {
+            return folderInstall ? .installed : .activated
+        }
+        let nameIsActive = !postScriptName.isEmpty
+        if folderInstall && nameIsActive && resolves(filePath: path, postScriptName: postScriptName) {
+            return .installed
+        }
+        return nameIsActive ? .available : .inactive
     }
 
     private static func isPersistentlyRegistered(_ path: String) -> Bool {

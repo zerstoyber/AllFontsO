@@ -4,27 +4,28 @@ import SwiftUI
 /// "Add font…": a popover with a search field over the whole library. Picking a font puts it into the preview
 /// beside the fonts already there, so Align and Overlay can start from a single font.
 struct AddFontButton: View {
-    @EnvironmentObject private var store: LibraryStore
+    @Environment(LibraryStore.self) private var store
     var title = "Add font…"
     var help = "Search the library and add a font to the preview"
     /// Where the chosen font goes. Without it, into the preview.
     var onPick: ((FontFace) -> Void)? = nil
     /// Marks the fonts already in place.
     var isChosen: ((FontFace) -> Bool)? = nil
+    @Environment(\.paperInk) private var paperInk
     @State private var open = false
     @State private var query = ""
 
     private let limit = 80
 
     var body: some View {
-        Button {
-            open.toggle()
-        } label: {
-            Label(title, systemImage: "plus")
-                .font(.caption)
-        }
-        .buttonStyle(.bordered)
-        .controlSize(.small)
+        styled(
+            Button {
+                open.toggle()
+            } label: {
+                Label(title, systemImage: "plus")
+                    .font(.caption)
+            }
+        )
         .help(help)
         .popover(isPresented: $open, arrowEdge: .bottom) {
             VStack(alignment: .leading, spacing: 8) {
@@ -72,6 +73,7 @@ struct AddFontButton: View {
                                     .contentShape(Rectangle())
                                 }
                                 .buttonStyle(.plain)
+                                .help("\(face.family) \(face.style)")
                             }
                         }
                     }
@@ -85,6 +87,16 @@ struct AddFontButton: View {
             }
             .padding(12)
             .frame(width: 320)
+        }
+    }
+
+    /// On the preview's paper the button takes its ink; elsewhere it is a small system button.
+    @ViewBuilder
+    private func styled(_ button: some View) -> some View {
+        if paperInk != nil {
+            button.buttonStyle(.paper)
+        } else {
+            button.buttonStyle(.bordered).controlSize(.small)
         }
     }
 
@@ -108,11 +120,6 @@ struct AddFontButton: View {
     }
 
     private var sortedFonts: [FontFace] {
-        store.fonts.sorted { lhs, rhs in
-            let family = lhs.family.localizedStandardCompare(rhs.family)
-            if family != .orderedSame { return family == .orderedAscending }
-            if lhs.weightClass != rhs.weightClass { return lhs.weightClass < rhs.weightClass }
-            return lhs.style.localizedStandardCompare(rhs.style) == .orderedAscending
-        }
+        store.fontsByName
     }
 }

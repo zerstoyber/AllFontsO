@@ -22,6 +22,10 @@ struct PlaygroundBlock: Codable, Identifiable, Hashable {
     var padBottom = 24.0
     var padLeft = 24.0
     var padRight = 24.0
+    /// A mix from the preview: the cut of each letter. Letters without an entry use `fontIdentity`.
+    var letters: [MixLetter] = []
+
+    var isMix: Bool { !letters.isEmpty }
 
     init(id: UUID = UUID(), text: String = "", fontIdentity: String = "", size: Double = 32, tracking: Double = 0, leading: Double = 1.2, padding: Double = 24) {
         self.id = id
@@ -41,7 +45,7 @@ struct PlaygroundBlock: Codable, Identifiable, Hashable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, text, fontIdentity, size, tracking, leading, padding, padTop, padBottom, padLeft, padRight
+        case id, text, fontIdentity, size, tracking, leading, padding, padTop, padBottom, padLeft, padRight, letters
     }
 
     init(from decoder: Decoder) throws {
@@ -58,6 +62,7 @@ struct PlaygroundBlock: Codable, Identifiable, Hashable {
         padBottom = try container.decodeIfPresent(Double.self, forKey: .padBottom) ?? shared
         padLeft = try container.decodeIfPresent(Double.self, forKey: .padLeft) ?? shared
         padRight = try container.decodeIfPresent(Double.self, forKey: .padRight) ?? shared
+        letters = try container.decodeIfPresent([MixLetter].self, forKey: .letters) ?? []
     }
 
     func encode(to encoder: Encoder) throws {
@@ -72,6 +77,50 @@ struct PlaygroundBlock: Codable, Identifiable, Hashable {
         try container.encode(padBottom, forKey: .padBottom)
         try container.encode(padLeft, forKey: .padLeft)
         try container.encode(padRight, forKey: .padRight)
+        if !letters.isEmpty {
+            try container.encode(letters, forKey: .letters)
+        }
+    }
+
+    /// The cut of every letter by its UTF-16 offset, with `fontIdentity` for letters the mix leaves open.
+    var letterFonts: [Int: String] {
+        Dictionary(letters.map { ($0.at, $0.font) }, uniquingKeysWith: { _, last in last })
+    }
+
+    /// Keeps the mix in step with an edit: letters after it move along, typed letters take the cut of the letter before.
+    /// Called before the edit lands, so `text` is still the old text.
+    mutating func shiftLetters(replacing range: NSRange, with length: Int) {
+        guard isMix else { return }
+        let before = letterFonts
+        var next = MixText.shift(before, replacing: range, with: length)
+        let string = text as NSString
+        if length > 0 {
+            var neighbour: Int?
+            if range.location > 0, range.location <= string.length {
+                neighbour = string.rangeOfComposedCharacterSequence(at: range.location - 1).location
+            } else if NSMaxRange(range) < string.length {
+                neighbour = NSMaxRange(range)
+            }
+            if let neighbour, let inherited = before[neighbour], inherited != fontIdentity {
+                for offset in range.location..<(range.location + length) {
+                    next[offset] = inherited
+                }
+            }
+        }
+        setLetterFonts(next)
+    }
+
+    /// Gives letters their own cut, or hands them back to the block's font with nil.
+    mutating func setFont(_ identity: String?, forLettersIn ranges: [NSRange]) {
+        var next = letterFonts
+        for range in ranges {
+            next[range.location] = identity == fontIdentity ? nil : identity
+        }
+        setLetterFonts(next)
+    }
+
+    private mutating func setLetterFonts(_ fonts: [Int: String]) {
+        letters = fonts.map { MixLetter(at: $0.key, font: $0.value) }.sorted { $0.at < $1.at }
     }
 }
 
@@ -110,6 +159,37 @@ final class PlaygroundDocument: ObservableObject {
         return added
     }
 
+    /// Appends a mix from the preview as one block, keeping the cut of every letter.
+    func addMix(text: String, letters: [MixLetter], size: Double, tracking: Double, leading: Double) {
+        var block = PlaygroundBlock(text: text, size: size, tracking: tracking, leading: leading)
+        block.fontIdentity = letters.first?.font ?? ""
+        block.letters = letters
+        if let last = blocks.last {
+            block.padTop = last.padTop
+            block.padBottom = last.padBottom
+            block.padLeft = last.padLeft
+            block.padRight = last.padRight
+        }
+        blocks.append(block)
+    }
+
+    /// Runs a change to the page and records it for Undo. Typing is undone by the text view on the same stack.
+    func change(_ undoManager: UndoManager?, _ name: String, _ body: () -> Void) {
+        let before = blocks
+        body()
+        registerUndo(from: before, undoManager, name)
+    }
+
+    private func registerUndo(from before: [PlaygroundBlock], _ undoManager: UndoManager?, _ name: String) {
+        guard let undoManager, before != blocks else { return }
+        undoManager.registerUndo(withTarget: self) { document in
+            let now = document.blocks
+            document.blocks = before
+            document.registerUndo(from: now, undoManager, name)
+        }
+        undoManager.setActionName(name)
+    }
+
     private static var fileURL: URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Fontso", isDirectory: true)
@@ -138,7 +218,7 @@ final class PlaygroundDocument: ObservableObject {
 
 /// A quiet page of text blocks for trying fonts together. The controls for a block appear when the pointer rests on it.
 struct PlaygroundView: View {
-    @EnvironmentObject private var store: LibraryStore
+    @Environment(LibraryStore.self) private var store
     @ObservedObject private var document = PlaygroundDocument.shared
     @AppStorage("fontso.specimen.background") private var backgroundHex = "F6F3EE"
     @AppStorage("fontso.specimen.foreground") private var foregroundHex = "212121"
@@ -147,12 +227,41 @@ struct PlaygroundView: View {
     @State private var settingsFor: UUID?
     @State private var pageWidth: CGFloat = 600
     @State private var exportOpen = false
+    @State private var dockHeight: CGFloat = 60
+    /// The letters selected in each block, for giving them a cut of their own.
+    @State private var selections: [UUID: NSRange] = [:]
+    @Environment(\.undoManager) private var undoManager
     @AppStorage("fontso.specimen.unit") private var unitRaw = SpecimenUnit.point.rawValue
 
     private var unit: SpecimenUnit { SpecimenUnit(rawValue: unitRaw) ?? .point }
 
     var body: some View {
-        ColumnScroll {
+        ZStack(alignment: .bottom) {
+            page
+            // Floats over the page like Adjust in the other modes.
+            HStack(spacing: 0) {
+                Spacer(minLength: 10)
+                UsedCutsBand(
+                    faces: usedFaces,
+                    note: "Every cut on the page, whole blocks and single letters.",
+                    embedded: true
+                )
+                .padding(10)
+                .background(Color(nsColor: paper), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(ink.opacity(0.18)))
+                .shadow(color: Color.black.opacity(0.14), radius: 14, y: 6)
+                .frame(maxWidth: 720)
+                Spacer(minLength: 10)
+            }
+            .padding(.bottom, 12)
+            .environment(\.colorScheme, paperIsDark ? .dark : .light)
+            .reportOverlayHeight()
+        }
+        .onPreferenceChange(OverlayHeightKey.self) { dockHeight = $0 }
+    }
+
+    private var page: some View {
+        ColumnScroll(bottomInset: dockHeight + 28) {
             VStack(alignment: .leading, spacing: 0) {
                 ForEach($document.blocks) { $block in
                     blockView($block)
@@ -193,16 +302,42 @@ struct PlaygroundView: View {
         let showsTools = hovered == value.id || settingsFor == value.id
         return Group {
             if let face {
-                SpecimenEditor(
+                // Every block can give single letters a cut of their own; without any, it is set in one font.
+                MixEditor(
                     text: block.text,
-                    face: face,
+                    fonts: mixFonts(value),
+                    fallback: SpecimenFont.make(path: face.filePath, index: face.faceIndex, size: value.size, variations: [:]) ?? .systemFont(ofSize: value.size),
+                    marked: [],
                     pointSize: value.size,
                     tracking: value.tracking * value.size,
                     leading: value.leading,
                     textColor: inkColor,
                     background: paper,
-                    variations: [:],
-                    measuredHeight: heightBinding(value.id)
+                    measuredHeight: heightBinding(value.id),
+                    onEdit: { range, length in
+                        block.wrappedValue.shiftLetters(replacing: range, with: length)
+                    },
+                    onSelect: { selections[value.id] = $0 },
+                    onDropFont: { identities, offset in
+                        guard let identity = identities.first(where: store.hasFace(identity:)) else { return }
+                        let selected = selectedLetters(block.wrappedValue)
+                        let selection = selections[block.wrappedValue.id] ?? NSRange(location: 0, length: 0)
+                        if let offset, !selected.isEmpty, NSLocationInRange(offset, selection) {
+                            document.change(undoManager, "Set Letters") {
+                                block.wrappedValue.setFont(identity, forLettersIn: selected)
+                            }
+                        } else if let offset, block.wrappedValue.isMix {
+                            let letter = (block.wrappedValue.text as NSString).rangeOfComposedCharacterSequence(at: offset)
+                            document.change(undoManager, "Set Letter") {
+                                block.wrappedValue.setFont(identity, forLettersIn: [letter])
+                            }
+                        } else {
+                            document.change(undoManager, "Set Font") {
+                                block.wrappedValue.fontIdentity = identity
+                                block.wrappedValue.letters = []
+                            }
+                        }
+                    }
                 )
                 .frame(maxWidth: .infinity, minHeight: max(heights[value.id] ?? 100, value.size * max(value.leading, 1.2) + 48), alignment: .topLeading)
             } else {
@@ -245,8 +380,11 @@ struct PlaygroundView: View {
         }
         .dropDestination(for: FontDragItem.self) { items, _ in
             guard let identity = items.flatMap(\.identities).first,
-                  store.fonts.contains(where: { $0.identity == identity }) else { return false }
-            block.wrappedValue.fontIdentity = identity
+                  store.hasFace(identity: identity) else { return false }
+            document.change(undoManager, "Set Font") {
+                block.wrappedValue.fontIdentity = identity
+                block.wrappedValue.letters = []
+            }
             return true
         }
     }
@@ -255,8 +393,15 @@ struct PlaygroundView: View {
     private func tools(_ block: Binding<PlaygroundBlock>, face: FontFace?) -> some View {
         let value = block.wrappedValue
         let index = document.blocks.firstIndex { $0.id == value.id } ?? 0
+        let letters = selectedLetters(value)
         return HStack(spacing: 2) {
             fontMenu(block, face: face)
+            if !letters.isEmpty {
+                Divider()
+                    .frame(height: 14)
+                    .padding(.horizontal, 2)
+                lettersMenu(block, letters: letters, face: face)
+            }
             Divider()
                 .frame(height: 14)
                 .padding(.horizontal, 2)
@@ -269,18 +414,18 @@ struct PlaygroundView: View {
                     .frame(width: 320)
             }
             toolButton("arrow.up", help: "Move up", disabled: index == 0) {
-                document.blocks.swapAt(index, index - 1)
+                document.change(undoManager, "Move Block") { document.blocks.swapAt(index, index - 1) }
             }
             toolButton("arrow.down", help: "Move down", disabled: index >= document.blocks.count - 1) {
-                document.blocks.swapAt(index, index + 1)
+                document.change(undoManager, "Move Block") { document.blocks.swapAt(index, index + 1) }
             }
             toolButton("plus.square.on.square", help: "Duplicate this block") {
                 var copy = value
                 copy.id = UUID()
-                document.blocks.insert(copy, at: index + 1)
+                document.change(undoManager, "Duplicate Block") { document.blocks.insert(copy, at: index + 1) }
             }
             toolButton("xmark", help: "Remove this block", disabled: document.blocks.count == 1) {
-                document.blocks.remove(at: index)
+                document.change(undoManager, "Remove Block") { _ = document.blocks.remove(at: index) }
             }
         }
         .padding(.horizontal, 6)
@@ -312,7 +457,10 @@ struct PlaygroundView: View {
                 Section("Selected in the library") {
                     ForEach(Array(selected)) { candidate in
                         Button {
-                            block.wrappedValue.fontIdentity = candidate.identity
+                            document.change(undoManager, "Set Font") {
+                                block.wrappedValue.fontIdentity = candidate.identity
+                                block.wrappedValue.letters = []
+                            }
                         } label: {
                             if candidate.identity == block.wrappedValue.fontIdentity {
                                 Label("\(candidate.family) \(candidate.style)", systemImage: "checkmark")
@@ -327,7 +475,10 @@ struct PlaygroundView: View {
                 Section("Cuts of \(face.family)") {
                     ForEach(store.cuts(in: face.family)) { cut in
                         Button {
-                            block.wrappedValue.fontIdentity = cut.identity
+                            document.change(undoManager, "Set Font") {
+                                block.wrappedValue.fontIdentity = cut.identity
+                                block.wrappedValue.letters = []
+                            }
                         } label: {
                             if cut.id == face.id {
                                 Label(cut.style, systemImage: "checkmark")
@@ -342,17 +493,105 @@ struct PlaygroundView: View {
                     store.selection = [face.id]
                     store.outsideSelection = []
                 }
-                Button("Clear font") { block.wrappedValue.fontIdentity = "" }
+                Button("Clear font") {
+                    document.change(undoManager, "Clear Font") {
+                        block.wrappedValue.fontIdentity = ""
+                        block.wrappedValue.letters = []
+                    }
+                }
             }
         } label: {
-            Text(face.map { "\($0.family) \($0.style)" } ?? "Choose font")
+            Text(blockTitle(block.wrappedValue, face: face))
                 .font(.caption.weight(.semibold))
                 .lineLimit(1)
         }
         .menuStyle(.borderlessButton)
         .fixedSize(horizontal: true, vertical: false)
         .frame(maxWidth: 240)
-        .help("Pick a font for this block: one of the fonts selected in the library, or another cut of the same family. You can also drop a font onto the block.")
+        .help("Pick a font for this block: one of the fonts selected in the library, or another cut of the same family. You can also drop a font onto the block. In a mix, drop a font on a letter to change just that letter.")
+    }
+
+    private func blockTitle(_ block: PlaygroundBlock, face: FontFace?) -> String {
+        if block.isMix {
+            let cuts = Set(block.letters.map(\.font)).union([block.fontIdentity]).count
+            return "Mix · \(cuts) \(cuts == 1 ? "cut" : "cuts")"
+        }
+        return face.map { "\($0.family) \($0.style)" } ?? "Choose font"
+    }
+
+    /// A cut for the letters selected in a block: from the library selection, the block's family, or anywhere.
+    private func lettersMenu(_ block: Binding<PlaygroundBlock>, letters: [NSRange], face: FontFace?) -> some View {
+        let selected = store.previewFaces.prefix(24)
+        let current = Set(letters.map { block.wrappedValue.letterFonts[$0.location] ?? block.wrappedValue.fontIdentity })
+        let title = letters.count == 1 ? "1 letter" : "\(letters.count) letters"
+        let pick: (String?, String) -> Void = { identity, name in
+            document.change(undoManager, name) {
+                block.wrappedValue.setFont(identity, forLettersIn: letters)
+            }
+        }
+        return HStack(spacing: 4) {
+            Menu {
+                if !selected.isEmpty {
+                    Section("Selected in the library") {
+                        ForEach(Array(selected)) { candidate in
+                            Button {
+                                pick(candidate.identity, "Set Letters")
+                            } label: {
+                                if current == [candidate.identity] {
+                                    Label("\(candidate.family) \(candidate.style)", systemImage: "checkmark")
+                                } else {
+                                    Text("\(candidate.family) \(candidate.style)")
+                                }
+                            }
+                        }
+                    }
+                }
+                if let face {
+                    Section("Cuts of \(face.family)") {
+                        ForEach(store.cuts(in: face.family)) { cut in
+                            Button(cut.style) { pick(cut.identity, "Set Letters") }
+                        }
+                    }
+                    Divider()
+                    Button("Back to the block font") { pick(nil, "Reset Letters") }
+                }
+            } label: {
+                Label(title, systemImage: "character.cursor.ibeam")
+                    .font(.caption.weight(.semibold))
+                    .lineLimit(1)
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .help("Give the selected letters a cut of their own. You can also drop a font onto the selection.")
+            AddFontButton(
+                title: "Other…",
+                help: "Give the selected letters any cut from the library",
+                onPick: { face in pick(face.identity, "Set Letters") },
+                isChosen: { current == [$0.identity] }
+            )
+        }
+    }
+
+    private func selectedLetters(_ block: PlaygroundBlock) -> [NSRange] {
+        guard let selection = selections[block.id], selection.length > 0 else { return [] }
+        let string = block.text as NSString
+        guard NSMaxRange(selection) <= string.length else { return [] }
+        return MixText.letters(in: block.text).filter { range in
+            NSIntersectionRange(range, selection).length > 0 && !string.substring(with: range).allSatisfy(\.isWhitespace)
+        }
+    }
+
+    private func mixFonts(_ block: PlaygroundBlock) -> [Int: NSFont] {
+        var made: [String: NSFont] = [:]
+        var result: [Int: NSFont] = [:]
+        for letter in block.letters {
+            if made[letter.font] == nil, let face = face(for: letter.font),
+               let font = SpecimenFont.make(path: face.filePath, index: face.faceIndex, size: block.size, variations: [:]) {
+                made[letter.font] = font
+            }
+            if let font = made[letter.font] { result[letter.at] = font }
+        }
+        return result
     }
 
     private func settings(_ block: Binding<PlaygroundBlock>) -> some View {
@@ -377,6 +616,7 @@ struct PlaygroundView: View {
                 .labelsHidden()
                 .controlSize(.small)
                 .frame(maxWidth: 150)
+                .help("Unit for size and padding: points, CSS pixels, or rem")
                 Spacer(minLength: 0)
             }
             metric("Size", value: displaySize, range: unit.display(from: 6)...unit.display(from: 240), step: sizeStep, format: sizeFormat, reset: unit.display(from: 32))
@@ -454,7 +694,7 @@ struct PlaygroundView: View {
                 block.padLeft = last.padLeft
                 block.padRight = last.padRight
             }
-            document.blocks.append(block)
+            document.change(undoManager, "Add Block") { document.blocks.append(block) }
             settingsFor = nil
         } label: {
             Label("Add block", systemImage: "plus")
@@ -467,13 +707,30 @@ struct PlaygroundView: View {
 
     // MARK: Export
 
+    /// Every cut on the page in block order: the block font, then the cuts of its letters.
+    private var usedFaces: [FontFace] {
+        var seen: Set<String> = []
+        var result: [FontFace] = []
+        for block in document.blocks {
+            for identity in [block.fontIdentity] + block.letters.map(\.font) where seen.insert(identity).inserted {
+                if let face = face(for: identity) { result.append(face) }
+            }
+        }
+        return result
+    }
+
     /// The families on the page, in block order, for the file name.
     private var usedFamilies: [String] {
         var seen: Set<String> = []
-        return document.blocks.compactMap { block in
-            guard let face = face(for: block.fontIdentity), seen.insert(face.family.lowercased()).inserted else { return nil }
-            return face.family
+        var families: [String] = []
+        for block in document.blocks {
+            let identities = block.isMix ? Array(Set(block.letters.map(\.font))).sorted() : [block.fontIdentity]
+            for identity in identities {
+                guard let face = face(for: identity), seen.insert(face.family.lowercased()).inserted else { continue }
+                families.append(face.family)
+            }
         }
+        return families
     }
 
     private func export(_ options: PlaygroundExportOptions) {
@@ -482,7 +739,7 @@ struct PlaygroundView: View {
         panel.nameFieldStringValue = PlaygroundPage.fileName(families: usedFamilies, kind: options.kind)
         panel.canCreateDirectories = true
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        let faces = Dictionary(store.fonts.map { ($0.identity, $0) }, uniquingKeysWith: { first, _ in first })
+        let faces = store.facesKeyedByIdentity
         let layout = PlaygroundPage.layout(
             blocks: document.blocks,
             faces: faces,
@@ -504,7 +761,7 @@ struct PlaygroundView: View {
 
     private func face(for identity: String) -> FontFace? {
         guard !identity.isEmpty else { return nil }
-        return store.fonts.first { $0.identity == identity }
+        return store.face(identity: identity)
     }
 
     private func heightBinding(_ id: UUID) -> Binding<CGFloat> {
@@ -604,6 +861,7 @@ struct PlaygroundExportSheet: View {
             }
             .pickerStyle(.segmented)
             .labelsHidden()
+            .help("Page size for the export")
             switch options.paper {
             case .screen:
                 Text("One page as wide as the preview column (\(Int(screenWidth)) pt) and as tall as the text.")
@@ -617,6 +875,7 @@ struct PlaygroundExportSheet: View {
                 .pickerStyle(.segmented)
                 .labelsHidden()
                 .frame(maxWidth: 220)
+                .help("Portrait or landscape")
                 Text("12 mm margin. Longer text runs over several pages.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -642,6 +901,7 @@ struct PlaygroundExportSheet: View {
             }
             .pickerStyle(.segmented)
             .frame(maxWidth: 220)
+            .help("PDF keeps the text sharp at any size; PNG is an image")
             if options.kind == .png, options.paper != .screen {
                 Text("PNG is 2× for Retina; every page becomes its own file.")
                     .font(.caption)
@@ -660,9 +920,11 @@ struct PlaygroundExportSheet: View {
                 Spacer()
                 Button("Cancel") { dismiss() }
                     .keyboardShortcut(.cancelAction)
+                    .help("Close without exporting")
                 Button("Export…") { export(options) }
                     .keyboardShortcut(.defaultAction)
                     .buttonStyle(.borderedProminent)
+                    .help("Choose where to save the export")
             }
         }
         .padding(20)
@@ -717,12 +979,20 @@ enum PlaygroundPage {
             paragraph.paragraphSpacingBefore = CGFloat(block.padTop)
             paragraph.paragraphSpacing = CGFloat(block.padBottom)
             let text = block.text.isEmpty ? " " : block.text
+            let start = storage.length
             storage.append(NSAttributedString(string: text + "\n", attributes: [
                 .font: font,
                 .foregroundColor: ink,
                 .kern: block.tracking * block.size,
                 .paragraphStyle: paragraph
             ]))
+            let string = text as NSString
+            for letter in block.letters where letter.at < string.length {
+                guard let cut = faces[letter.font],
+                      let letterFont = SpecimenFont.make(path: cut.filePath, index: cut.faceIndex, size: block.size, variations: [:]) else { continue }
+                let range = string.rangeOfComposedCharacterSequence(at: letter.at)
+                storage.addAttribute(.font, value: letterFont, range: NSRange(location: start + range.location, length: range.length))
+            }
         }
         let manager = NSLayoutManager()
         let container = NSTextContainer(size: CGSize(width: format.width - 2 * format.margin, height: 10_000_000))

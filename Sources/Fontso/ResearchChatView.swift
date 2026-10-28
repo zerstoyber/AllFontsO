@@ -31,7 +31,7 @@ private struct FlowChips: View {
 }
 
 struct ResearchChatView: View {
-    @EnvironmentObject private var store: LibraryStore
+    @Environment(LibraryStore.self) private var store
     @AppStorage("fontso.researchPanelOpen") private var composerOpen = true
     @State private var draft = ""
     @State private var showModels = false
@@ -323,6 +323,7 @@ struct ResearchChatView: View {
                     send()
                 }
                 .buttonStyle(.bordered)
+                .help("Ask this question")
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -741,7 +742,7 @@ struct ResearchChatView: View {
 }
 
 private struct SuggestionCard: View {
-    @EnvironmentObject private var store: LibraryStore
+    @Environment(LibraryStore.self) private var store
     @AppStorage("fontso.sampleText") private var listSample = SpecimenText.standard
     var suggestion: ResearchSuggestion
     var sampleSize: CGFloat
@@ -824,6 +825,7 @@ private struct SuggestionCard: View {
                         .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
+                .help("Show or hide every style of this family")
                 if expanded {
                     VStack(alignment: .leading, spacing: 2) {
                         ForEach(cuts) { cut in
@@ -831,6 +833,7 @@ private struct SuggestionCard: View {
                                 Button(cut.style) { onSelect(cut) }
                                     .buttonStyle(.plain)
                                     .lineLimit(1)
+                                    .help("Use this style")
                                 Spacer(minLength: 8)
                                 Text(cut.format.uppercased())
                                     .font(.caption2.weight(.medium))
@@ -877,7 +880,7 @@ private struct SuggestionCard: View {
 
 /// Takes the place of the chat while another program drives AllFontsO over MCP.
 struct ResearchHandledByMCPView: View {
-    @EnvironmentObject private var store: LibraryStore
+    @Environment(LibraryStore.self) private var store
     @State private var showModels = false
 
     var body: some View {
@@ -905,7 +908,9 @@ struct ResearchHandledByMCPView: View {
             }
             HStack(spacing: 10) {
                 Button("Configuration…") { showModels = true }
+                    .help("Choose the AI that answers Research")
                 Button("Switch MCP off") { store.setMCPEnabled(false) }
+                    .help("Stop letting other apps control AllFontsO")
             }
         }
         .padding(32)
@@ -918,7 +923,7 @@ struct ResearchHandledByMCPView: View {
 
 struct ResearchModelSheet: View {
     @Environment(\.dismiss) private var dismiss
-    @EnvironmentObject private var store: LibraryStore
+    @Environment(LibraryStore.self) private var store
     @State private var choices: [ResearchChoice] = []
     @State private var discovered = false
     @State private var claudeModel = ResearchSettings.kind == "anthropic" && !ResearchSettings.model.isEmpty
@@ -968,12 +973,15 @@ struct ResearchModelSheet: View {
                             apply(choice)
                         }
                         .buttonStyle(.bordered)
+                        .help("Answer with this model")
                     }
                 }
             }
             HStack {
                 Button("Get Ollama") { open("https://ollama.com/download") }
+                    .help("Open the Ollama download page")
                 Button("Get LM Studio") { open("https://lmstudio.ai") }
+                    .help("Open the LM Studio website")
             }
             Divider()
             Text("Your own AI")
@@ -987,6 +995,7 @@ struct ResearchModelSheet: View {
                 set: { store.setMCPEnabled($0) }
             ))
             .toggleStyle(.switch)
+            .help("Lets your own AI agent search and organise the library through MCP. Off by default.")
             if store.mcpEnabled {
                 if let error = store.mcpError {
                     Text(error)
@@ -1015,14 +1024,18 @@ struct ResearchModelSheet: View {
                 .fixedSize(horizontal: false, vertical: true)
             HStack {
                 Button("Buy credits") { open("https://platform.claude.com/settings/billing") }
+                    .help("Open Claude billing in the browser")
                 Button("Create API key") { open("https://platform.claude.com/settings/keys") }
+                    .help("Open Claude API keys in the browser")
                 Button("Workspaces") { open("https://platform.claude.com/settings/workspaces") }
+                    .help("Open Claude workspaces in the browser")
             }
             Picker("Model", selection: $claudeModel) {
                 Text("Haiku").tag("claude-haiku-4-5")
                 Text("Sonnet").tag("claude-sonnet-4-5")
             }
             .pickerStyle(.segmented)
+            .help("The Claude model that answers")
             SecureField("API key", text: $claudeKey, prompt: Text("sk-ant-…"))
                 .textFieldStyle(.roundedBorder)
             TextField("Workspace ID", text: $claudeWorkspace, prompt: Text("wrkspc_…"))
@@ -1039,6 +1052,7 @@ struct ResearchModelSheet: View {
                 dismiss()
             }
             .disabled(claudeKey.cleanedFontName.isEmpty && !hasStoredKey)
+            .help("Answer Research with Claude and this key")
             Divider()
             Text("Other OpenAI-compatible server")
                 .font(.headline)
@@ -1058,9 +1072,11 @@ struct ResearchModelSheet: View {
                 dismiss()
             }
             .disabled(customURL.cleanedFontName.isEmpty || customModel.cleanedFontName.isEmpty)
+            .help("Answer Research with this server")
             HStack {
                 Spacer()
                 Button("Close") { dismiss() }
+                    .help("Close the settings")
             }
     }
 
@@ -1079,6 +1095,7 @@ struct ResearchModelSheet: View {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(text, forType: .string)
                 }
+                .help("Copy this to the clipboard")
             }
         }
     }

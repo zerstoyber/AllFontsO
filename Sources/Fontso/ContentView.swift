@@ -4,7 +4,7 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 struct ContentView: View {
-    @EnvironmentObject private var store: LibraryStore
+    @Environment(LibraryStore.self) private var store
     @State private var helpTopic: HelpTopic?
     @Environment(\.openWindow) private var openWindow
     @AppStorage("fontso.sidebarCollapsed") private var sidebarCollapsed = false
@@ -77,8 +77,8 @@ struct ContentView: View {
         } message: {
             Text("The files stay on disk. Only the AllFontsO entry is removed.")
         }
-        .alert(newGroupTitle, isPresented: $store.showNewGroup) {
-            TextField("Name", text: $store.newGroupName)
+        .alert(newGroupTitle, isPresented: Bindable(store).showNewGroup) {
+            TextField("Name", text: Bindable(store).newGroupName)
             Button("Create") { store.commitNewGroup() }
             Button("Cancel", role: .cancel) {
                 store.newGroupName = ""
@@ -88,18 +88,18 @@ struct ContentView: View {
             Text("Drag fonts from the font list, or from Research, onto the list. Lists can be dragged into each other to nest them.")
         }
         .alert("Rename list", isPresented: renamePresented) {
-            TextField("Name", text: $store.renameGroupName)
+            TextField("Name", text: Bindable(store).renameGroupName)
             Button("Save") { store.commitRenameGroup() }
             Button("Cancel", role: .cancel) { store.groupPendingRename = nil }
         }
         .alert("Rename", isPresented: titleRenamePresented) {
-            TextField("Name", text: $store.renameTitle)
+            TextField("Name", text: Bindable(store).renameTitle)
             Button("Save") { store.commitRenameTitle() }
             Button("Cancel", role: .cancel) { store.titlePending = nil }
         }
-        .sheet(isPresented: $store.showFoundries) {
+        .sheet(isPresented: Bindable(store).showFoundries) {
             FoundriesView()
-                .environmentObject(store)
+                .environment(store)
         }
         .onChange(of: store.showReview) { _, open in
             guard open else { return }
@@ -143,6 +143,7 @@ struct ContentView: View {
                     .lineLimit(1)
                 Button("Cancel") { store.cancelScan() }
                     .buttonStyle(.borderless)
+                    .help("Stop reading the folders")
             } else {
                 Text(store.summaryText)
             }
@@ -369,7 +370,7 @@ enum SidebarSection: String, CaseIterable, Identifiable {
 }
 
 struct SidebarView: View {
-    @EnvironmentObject private var store: LibraryStore
+    @Environment(LibraryStore.self) private var store
     @AppStorage("fontso.sidebar.order") private var orderRaw = SidebarSection.defaultOrder
     @AppStorage("fontso.sidebar.collapsed") private var collapsedRaw = ""
 
@@ -728,7 +729,7 @@ struct SidebarView: View {
 }
 
 private struct SidebarDropRow: View {
-    @EnvironmentObject private var store: LibraryStore
+    @Environment(LibraryStore.self) private var store
     var title: String
     var filter: LibraryFilter
     var count: Int?
@@ -921,7 +922,7 @@ private struct LoadingColumns: View {
 }
 
 struct FontsoCommands: Commands {
-    @ObservedObject var store: LibraryStore
+    var store: LibraryStore
 
     var body: some Commands {
         CommandMenu("Library") {

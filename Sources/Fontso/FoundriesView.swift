@@ -3,7 +3,7 @@ import FontsoCore
 import SwiftUI
 
 struct FoundriesView: View {
-    @EnvironmentObject private var store: LibraryStore
+    @Environment(LibraryStore.self) private var store
     @Environment(\.dismiss) private var dismiss
     @State private var query = ""
     @State private var addedName = ""
@@ -17,8 +17,10 @@ struct FoundriesView: View {
                 Spacer()
                 Button("Update index") { store.indexFoundries() }
                     .disabled(store.isIndexingFoundries)
+                    .help("Fetch the foundry lists again")
                 Button("Done") { dismiss() }
                     .keyboardShortcut(.defaultAction)
+                    .help("Close the foundries")
             }
             Text("The index is the full list from typefoundries.info and the Type Foundry Directory. Star a foundry to follow it, or add one of your own. New names from followed foundries show up in News.")
                 .font(.callout)
@@ -51,6 +53,7 @@ struct FoundriesView: View {
                     addedName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                         || addedSite.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 )
+                .help("Add this foundry and follow it")
             }
             List(shown) { foundry in
                 HStack(spacing: 8) {
@@ -73,6 +76,7 @@ struct FoundriesView: View {
                     Spacer(minLength: 8)
                     Button("Open") { NSWorkspace.shared.open(foundry.url) }
                         .buttonStyle(.borderless)
+                        .help("Open the foundry’s website")
                 }
             }
             .frame(minHeight: 280)

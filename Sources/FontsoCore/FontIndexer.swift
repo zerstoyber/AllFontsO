@@ -131,6 +131,7 @@ public enum FontIndexer {
         guard !probed.isEmpty else { return [] }
 
         let shared = metrics.count == 1 ? metrics[0] : nil
+        let names = activeNames ?? FontActivator.activePostScriptNames()
         return probed.enumerated().map { index, face in
             let metric = index < metrics.count ? metrics[index] : shared
             let familyName = face.family.isEmpty ? fileURL.deletingPathExtension().lastPathComponent : face.family
@@ -178,9 +179,9 @@ public enum FontIndexer {
                 fileSize: fileSize,
                 modifiedAt: modifiedAt,
                 activation: FontActivator.availability(
-                    filePath: path,
+                    libraryPath: path,
                     postScriptName: face.postscriptName,
-                    activeNames: activeNames
+                    activeNames: names
                 ),
                 xHeight: metric?.xHeight ?? 0,
                 capHeight: metric?.capHeight ?? 0,

@@ -3,7 +3,7 @@ import FontsoCore
 import SwiftUI
 
 struct NewsView: View {
-    @EnvironmentObject private var store: LibraryStore
+    @Environment(LibraryStore.self) private var store
     @State private var outsideAnchor: String?
     @State private var editingOutside: OutsideFont?
 
@@ -41,6 +41,7 @@ struct NewsView: View {
                     }
                     Button("Follow more") { store.showFoundries = true }
                         .buttonStyle(.borderless)
+                        .help("Pick more foundries to follow")
                 }
             }
             .padding(16)
@@ -92,12 +93,14 @@ struct NewsView: View {
             if store.foundries.isEmpty {
                 Button("Index foundries") { store.indexFoundries() }
                     .buttonStyle(.borderless)
+                    .help("Fetch the list of foundries to follow")
             } else {
                 ForEach(store.suggestedFoundries()) { foundry in
                     suggestionRow(foundry)
                 }
                 Button("All foundries") { store.showFoundries = true }
                     .buttonStyle(.borderless)
+                    .help("See every foundry and choose which to follow")
             }
         }
     }
@@ -120,6 +123,7 @@ struct NewsView: View {
             Spacer()
             Button("Open") { NSWorkspace.shared.open(foundry.url) }
                 .buttonStyle(.borderless)
+                .help("Open the foundry’s website")
         }
         .padding(.vertical, 4)
     }
@@ -148,9 +152,11 @@ struct NewsView: View {
                 if lane == .fresh {
                     Button("Mark seen") { markSeen(chosen) }
                         .buttonStyle(.borderless)
+                        .help("Move the selected releases to Old")
                 }
                 Button("Remove", role: .destructive) { remove(chosen) }
                     .buttonStyle(.borderless)
+                    .help("Remove the selected releases from News")
             }
             Spacer(minLength: 4)
             Button(allChosen ? "Deselect all" : "Select all") {
@@ -163,6 +169,7 @@ struct NewsView: View {
                 }
             }
             .buttonStyle(.borderless)
+            .help("Select or deselect every release in this view")
         }
         .font(.caption)
         .padding(.horizontal, 8)

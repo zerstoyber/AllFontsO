@@ -23,8 +23,10 @@ struct FoundryPageView: View {
                     Spacer(minLength: 4)
                     Button("Reload") { status.reloadToken += 1 }
                         .buttonStyle(.borderless)
+                        .help("Load the page again")
                     Button("Open in browser") { NSWorkspace.shared.open(url) }
                         .buttonStyle(.borderless)
+                        .help("Open the page in your browser")
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -145,7 +147,7 @@ struct SpecimenPicture: View {
     var item: OutsideFont?
     var url: URL?
     var height: CGFloat = 220
-    @EnvironmentObject private var store: LibraryStore
+    @Environment(LibraryStore.self) private var store
     @State private var gaveUp = false
 
     private var imageURL: URL? { url ?? item?.imageURL }
@@ -198,7 +200,7 @@ struct SpecimenPicture: View {
 }
 
 struct SpecimenView: View {
-    @EnvironmentObject private var store: LibraryStore
+    @Environment(LibraryStore.self) private var store
     @AppStorage("fontso.sampleText") private var specimenText = SpecimenText.standard
     @AppStorage("fontso.specimenSize") private var specimenSize = 48.0
     @AppStorage("fontso.specimen.unit") private var unitRaw = SpecimenUnit.point.rawValue
@@ -226,6 +228,7 @@ struct SpecimenView: View {
     @AppStorage("fontso.inspectorOpen") private var inspectorOpen = true
     @AppStorage("fontso.previewCollapsed") private var previewCollapsed = false
     @AppStorage("fontso.playgroundOpen") private var playgroundOpen = false
+    @AppStorage("fontso.mixOpen") private var mixOpen = false
     @State private var colorsOpen = false
     @Environment(\.barLeadingInset) private var barLeadingInset
     /// Feature switches moved away from the font's defaults, by feature id. Shared by every font in the preview,
@@ -264,6 +267,10 @@ struct SpecimenView: View {
             previewColumnBar(faces)
             if playgroundOpen {
                 PlaygroundView()
+                    .paperColors(ink: ink, paper: Color(nsColor: paper))
+            } else if mixOpen {
+                LetterMixView()
+                    .paperColors(ink: ink, paper: Color(nsColor: paper))
             } else if faces.isEmpty && store.outsideSelection.isEmpty {
                 ContentUnavailableView {
                     Label("Specimen", systemImage: "doc.richtext")
@@ -291,6 +298,7 @@ struct SpecimenView: View {
                         AddFontButton(title: "Add font…")
                         Button("Back to Preview") { select(.preview, faces: faces) }
                             .controlSize(.small)
+                            .help("Back to the plain preview")
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -299,13 +307,16 @@ struct SpecimenView: View {
                 }
             } else if faces.isEmpty && store.outsideSelection.count == 1, let item = store.outsideSelection.first {
                 outsideFocus(item)
+                    .paperColors(ink: ink, paper: Color(nsColor: paper))
             } else if faces.isEmpty {
                 ColumnScroll {
                     outsideStack
                         .padding(16)
                 }
+                .paperColors(ink: ink, paper: Color(nsColor: paper))
             } else {
                 specimen(faces)
+                    .paperColors(ink: ink, paper: Color(nsColor: paper))
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -319,9 +330,9 @@ struct SpecimenView: View {
         }
     }
 
-    /// Which of the four preview modes is showing.
+    /// Which of the preview modes is showing.
     private enum PreviewMode: String, CaseIterable, Identifiable {
-        case preview, align, overlay, playground
+        case preview, align, overlay, mix, playground
         var id: String { rawValue }
 
         var title: String {
@@ -329,6 +340,7 @@ struct SpecimenView: View {
             case .preview: return "Preview"
             case .align: return "Align"
             case .overlay: return "Overlay"
+            case .mix: return "Mix"
             case .playground: return "Playground"
             }
         }
@@ -338,6 +350,7 @@ struct SpecimenView: View {
             case .preview: return "text.alignleft"
             case .align: return "rectangle.split.2x1"
             case .overlay: return "square.on.square"
+            case .mix: return "dice"
             case .playground: return "square.text.square"
             }
         }
@@ -347,6 +360,7 @@ struct SpecimenView: View {
             case .preview: return "Preview: each font on its own, with Adjust and Info"
             case .align: return "Align: fonts side by side on one baseline, to compare x-height and cap height"
             case .overlay: return "Overlay: fonts laid on top of each other"
+            case .mix: return "Mix: every letter in its own cut, chosen by you, at random, or close in x-height and width"
             case .playground: return "Playground: mix fonts in text blocks, each with its own size, tracking, and leading"
             }
         }
@@ -354,6 +368,7 @@ struct SpecimenView: View {
 
     private var mode: PreviewMode {
         if playgroundOpen { return .playground }
+        if mixOpen { return .mix }
         if overlayOpen { return .overlay }
         if alignOpen { return .align }
         return .preview
@@ -361,6 +376,7 @@ struct SpecimenView: View {
 
     private func select(_ mode: PreviewMode, faces: [FontFace]) {
         playgroundOpen = mode == .playground
+        mixOpen = mode == .mix
         alignOpen = mode == .align
         overlayOpen = mode == .overlay
         if mode == .overlay, overlayFocus == nil {
@@ -518,6 +534,7 @@ struct SpecimenView: View {
                     .pickerStyle(.segmented)
                     .labelsHidden()
                     .controlSize(.small)
+                    .help("Adjust sets size and spacing; Info shows the font’s details")
                 } else {
                     Text("Adjust")
                         .font(.caption.weight(.semibold))
@@ -551,6 +568,10 @@ struct SpecimenView: View {
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            if !(oneFont && panel == .info) {
+                Divider()
+                UsedCutsBand(faces: Array(faces.prefix(previewLimit)), onRemove: { store.removeFromPreview($0) }, embedded: true)
             }
         }
         .padding(8)
@@ -635,8 +656,8 @@ struct SpecimenView: View {
                         .lineLimit(1)
                 }
                 Spacer(minLength: 8)
-                paperButton("Edit…") { editingOutside = item }
-                paperButton("Open") { NSWorkspace.shared.open(ready ? page : item.url) }
+                paperButton("Edit…", help: "Change the name, source, or link") { editingOutside = item }
+                paperButton("Open", help: "Open the page in your browser") { NSWorkspace.shared.open(ready ? page : item.url) }
             }
             if ready {
                 FoundryPageView(url: page)
@@ -685,8 +706,7 @@ struct SpecimenView: View {
     }
 
     private func outsidePreview(_ item: OutsideFont, embedPage: Bool) -> some View {
-        let match = store.fonts.first { $0.family.caseInsensitiveCompare(item.name) == .orderedSame && !$0.isItalic }
-            ?? store.fonts.first { $0.family.caseInsensitiveCompare(item.name) == .orderedSame }
+        let match = store.face(forFamily: item.name)
         return VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 Text(match == nil ? "Name only" : "In library")
@@ -698,8 +718,8 @@ struct SpecimenView: View {
                     .font(.caption)
                     .foregroundStyle(ink.opacity(0.72))
                 Spacer()
-                paperButton("Edit…") { editingOutside = item }
-                paperButton("Open") { NSWorkspace.shared.open(item.url) }
+                paperButton("Edit…", help: "Change the name, source, or link") { editingOutside = item }
+                paperButton("Open", help: "Open the page in your browser") { NSWorkspace.shared.open(item.url) }
             }
             Text(item.name)
                 .font(.system(size: match == nil ? 28 : 22, weight: .medium))
@@ -811,6 +831,7 @@ struct SpecimenView: View {
                 if familyCount > faces.count {
                     Toggle("Apply to the whole family (\(familyCount) styles)", isOn: $licenseWholeFamily)
                         .font(.callout)
+                        .help("Set the license for every style of the family at once")
                 }
                 Text("Licensed cuts appear under Licensed in the sidebar and with the Only licensed filter.")
                     .font(.caption)
@@ -840,7 +861,7 @@ struct SpecimenView: View {
     private func licenseTargets(_ faces: [FontFace]) -> [FontFace] {
         guard licenseWholeFamily else { return faces }
         let families = Set(faces.map(\.family))
-        return store.fonts.filter { families.contains($0.family) }
+        return families.flatMap { family in store.cuts(in: family).filter { $0.family == family } }
     }
 
     private func notesSection(_ faces: [FontFace]) -> some View {
@@ -970,7 +991,7 @@ struct SpecimenView: View {
     private func reorderPreview(moving identities: [String], before face: FontFace) {
         let ids = Set(store.previewFaces.map(\.id))
         let movingIDs = identities.compactMap { identity in
-            store.fonts.first { $0.identity == identity && ids.contains($0.id) }?.id
+            store.face(identity: identity).map(\.id).flatMap { ids.contains($0) ? $0 : nil }
         }
         guard !movingIDs.isEmpty, !movingIDs.contains(face.id) else { return }
         var order = previewOrder.isEmpty ? store.previewFaces.map(\.id) : previewOrder
@@ -1028,7 +1049,12 @@ struct SpecimenView: View {
             .contentShape(Rectangle())
             .draggable(FontDragItem(identities: [face.identity]))
             .dropDestination(for: FontDragItem.self) { items, _ in
-                reorderPreview(moving: items.flatMap(\.identities), before: face)
+                let identities = items.flatMap(\.identities)
+                let shown = Set(store.previewFaces.map(\.identity))
+                guard identities.contains(where: { shown.contains($0) }) else {
+                    return store.addToPreview(identities)
+                }
+                reorderPreview(moving: identities, before: face)
                 return true
             } isTargeted: { _ in }
             ZStack(alignment: .topLeading) {
@@ -1080,7 +1106,7 @@ struct SpecimenView: View {
         } label: {
             Image(systemName: pinned ? "pin.fill" : "pin")
                 .font(.caption2.weight(.medium))
-                .foregroundStyle(pinned ? Color.accentColor : ink.opacity(0.6))
+                .foregroundStyle(pinned ? ink : ink.opacity(0.6))
                 .frame(width: 18, height: 18)
                 .contentShape(Rectangle())
         }
@@ -1092,8 +1118,8 @@ struct SpecimenView: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 referenceMenu(faces)
-                paperButton("X-height") { snapAlign(faces, metric: CTFontGetXHeight) }
-                paperButton("Cap height") { snapAlign(faces, metric: CTFontGetCapHeight) }
+                paperButton("X-height", help: "Shift the fonts so their x-heights meet the reference") { snapAlign(faces, metric: CTFontGetXHeight) }
+                paperButton("Cap height", help: "Shift the fonts so their cap heights meet the reference") { snapAlign(faces, metric: CTFontGetCapHeight) }
                 paperReset("Reset alignment") { alignShifts = [:] }
                 Spacer(minLength: 0)
                 playgroundMenu(faces)
@@ -1136,8 +1162,8 @@ struct SpecimenView: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 referenceMenu(faces)
-                paperButton("X-height") { snapAlign(faces, metric: CTFontGetXHeight) }
-                paperButton("Cap height") { snapAlign(faces, metric: CTFontGetCapHeight) }
+                paperButton("X-height", help: "Shift the fonts so their x-heights meet the reference") { snapAlign(faces, metric: CTFontGetXHeight) }
+                paperButton("Cap height", help: "Shift the fonts so their cap heights meet the reference") { snapAlign(faces, metric: CTFontGetCapHeight) }
                 paperReset("Reset alignment") { alignShifts = [:] }
                 Text("Drag a font up or down.")
                     .font(.caption)
@@ -1363,6 +1389,7 @@ struct SpecimenView: View {
                 .labelsHidden()
                 .controlSize(.small)
                 .frame(minWidth: 92, idealWidth: 112, maxWidth: 130)
+                .help("Unit for size and line height: points, CSS pixels, or rem")
             }
             metricRow("Spacing", value: $tracking, range: -0.08...0.4, step: 0.01, fraction: 2, reset: { tracking = 0 })
             metricRow("Line height", value: displayLeading, range: leadingRange, step: sliderStep, fraction: unit == .rem ? 2 : 1, reset: { leading = 1.2 })
@@ -1402,39 +1429,7 @@ struct SpecimenView: View {
         reset: @escaping () -> Void,
         @ViewBuilder extra: () -> Extra
     ) -> some View {
-        let label = Text(title)
-            .font(.caption)
-            .foregroundStyle(.secondary)
-            .lineLimit(1)
-        let field = valueField(value, range: range, fraction: fraction)
-        let resetControl = resetButton("Reset \(title)", action: reset)
-        // A plain slider without tick marks; the step still snaps the value.
-        let snapped = Binding<Double>(
-            get: { value.wrappedValue },
-            set: { value.wrappedValue = SpecimenView.snap($0, step: step, range: range) }
-        )
-        return ViewThatFits(in: .horizontal) {
-            HStack(spacing: 8) {
-                label.frame(width: 72, alignment: .leading)
-                extra()
-                Slider(value: snapped, in: range)
-                    .controlSize(.small)
-                    .frame(minWidth: 48)
-                field
-                resetControl
-            }
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 8) {
-                    label
-                    extra()
-                    Spacer(minLength: 4)
-                    field
-                    resetControl
-                }
-                Slider(value: snapped, in: range)
-                    .controlSize(.small)
-            }
-        }
+        AdjustRow(title: title, value: value, range: range, step: step, fraction: fraction, reset: reset, extra: extra)
     }
 
     /// Rounds a slider value to its step and keeps it inside the range.
@@ -1457,22 +1452,6 @@ struct SpecimenView: View {
         }
     }
 
-    private func valueField(_ value: Binding<Double>, range: ClosedRange<Double>, fraction: Int) -> some View {
-        TextField(
-            "",
-            value: Binding(
-                get: { value.wrappedValue },
-                set: { value.wrappedValue = min(range.upperBound, max(range.lowerBound, $0)) }
-            ),
-            format: .number.precision(.fractionLength(0...fraction))
-        )
-        .textFieldStyle(.roundedBorder)
-        .font(.caption.monospacedDigit())
-        .multilineTextAlignment(.trailing)
-        .frame(width: 58)
-        .controlSize(.small)
-    }
-
     private var colorSwatches: some View {
         HStack(spacing: 6) {
             ForEach(SpecimenSwatch.presets) { swatch in
@@ -1480,8 +1459,8 @@ struct SpecimenView: View {
                     backgroundHex = swatch.background
                     foregroundHex = swatch.foreground
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
+                .buttonStyle(.paper)
+                .help("Paper and ink: \(swatch.name)")
             }
         }
     }
@@ -1530,7 +1509,7 @@ struct SpecimenView: View {
                     if !featureOverrides.isEmpty {
                         Text("· \(featureOverrides.count) changed")
                             .font(.caption)
-                            .foregroundStyle(Color.accentColor)
+                            .foregroundStyle(ink.opacity(0.8))
                     }
                 }
             }
@@ -1629,6 +1608,7 @@ struct SpecimenView: View {
                                     .foregroundStyle(.secondary)
                             }
                             .buttonStyle(.plain)
+                            .help("Clear the search")
                         }
                     }
                     .font(.callout)
@@ -1671,7 +1651,7 @@ struct SpecimenView: View {
                                 .padding(.vertical, 4)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .background(
-                                    copiedCode == code ? Color.accentColor.opacity(0.16) : Color.primary.opacity(0.04),
+                                    copiedCode == code ? ink.opacity(0.16) : ink.opacity(0.04),
                                     in: RoundedRectangle(cornerRadius: 6)
                                 )
                             }
@@ -1817,7 +1797,8 @@ struct SpecimenView: View {
                             systemImage: face.canDeactivate ? "minus.circle" : "checkmark.circle"
                         )
                     }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.paperProminent)
+                    .help("Activate makes the font available to other apps; Deactivate removes it again")
                 }
             }
             if store.selection.count > 1 {
@@ -1862,16 +1843,18 @@ struct SpecimenView: View {
                                 .font(.callout.weight(selected ? .semibold : .regular))
                                 .padding(.horizontal, 12)
                                 .padding(.vertical, 6)
-                                .foregroundStyle(selected ? Color.white : Color.primary)
-                                .background(selected ? Color.accentColor : Color.clear, in: Capsule())
-                                .overlay(Capsule().stroke(selected ? Color.clear : Color.secondary.opacity(0.45), lineWidth: 1))
+                                .foregroundStyle(selected ? Color(nsColor: paper) : ink)
+                                .background(selected ? ink : Color.clear, in: Capsule())
+                                .overlay(Capsule().stroke(selected ? Color.clear : ink.opacity(0.45), lineWidth: 1))
                             }
                             .buttonStyle(.plain)
+                            .help("Put this font in \(category.rawValue), or take it out")
                         }
                     }
                     if familyCount > 1 {
                         Toggle("Apply to all \(familyCount) styles", isOn: $fileWholeFamily)
                             .font(.callout)
+                            .help("File every style of the family at once")
                     }
                 }
                 VStack(alignment: .leading, spacing: 8) {
@@ -1886,7 +1869,8 @@ struct SpecimenView: View {
                                 Button(list.name) {
                                     store.filter = .group(list.id)
                                 }
-                                .buttonStyle(.bordered)
+                                .buttonStyle(.paper)
+                                .help("Show the list \(list.name)")
                             }
                         }
                     }
@@ -1903,8 +1887,8 @@ struct SpecimenView: View {
         } label: {
             Label("Show in Finder", systemImage: "folder")
         }
-        .buttonStyle(.bordered)
-        .help(face.filePath)
+        .buttonStyle(.paper)
+        .help("Show the file in the Finder: \(face.filePath)")
     }
 
     private var unit: SpecimenUnit {
@@ -2033,15 +2017,10 @@ struct SpecimenView: View {
             : "Activate this file so other apps can use it.")
     }
 
-    private func paperButton(_ title: String, action: @escaping () -> Void) -> some View {
+    private func paperButton(_ title: String, help: String, action: @escaping () -> Void) -> some View {
         Button(title, action: action)
-            .buttonStyle(.plain)
-            .font(.caption.weight(.medium))
-            .foregroundStyle(ink)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(ink.opacity(0.12), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).stroke(ink.opacity(0.45)))
+            .buttonStyle(.paper)
+            .help(help)
     }
 
     private func paperReset(_ help: String, action: @escaping () -> Void) -> some View {
@@ -2125,7 +2104,7 @@ struct SpecimenView: View {
 }
 
 private struct NoteEditor: NSViewRepresentable {
-    @EnvironmentObject private var store: LibraryStore
+    @Environment(LibraryStore.self) private var store
     var face: FontFace
 
     func makeCoordinator() -> Coordinator {
@@ -2222,6 +2201,7 @@ private final class SpecimenTextView: NSTextView {
         layout.addTextContainer(container)
         super.init(frame: .zero, textContainer: container)
         clipsToBounds = false
+        unregisterDraggedTypes()
     }
 
     @available(*, unavailable)
@@ -2235,6 +2215,9 @@ private final class SpecimenTextView: NSTextView {
         layer?.masksToBounds = false
         superview?.clipsToBounds = false
     }
+
+    /// Drops pass through to the preview, so a font dragged onto the sample text joins the preview.
+    override var acceptableDragTypes: [NSPasteboard.PasteboardType] { [] }
 
     override func scrollWheel(with event: NSEvent) {
         ScrollWheelForwarding.pass(event, from: self)
@@ -2254,7 +2237,7 @@ private struct SpecimenSwatch: Identifiable {
     ]
 }
 
-private enum SpecimenInk {
+enum SpecimenInk {
     static func overflow(font: NSFont, text: String) -> (top: CGFloat, bottom: CGFloat) {
         let fallback = max(8, font.pointSize * 0.25)
         let flat = String(text.prefix(160)).replacingOccurrences(of: "\n", with: " ")

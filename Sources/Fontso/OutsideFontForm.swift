@@ -38,9 +38,11 @@ struct OutsideFontForm: View {
             HStack {
                 Spacer()
                 Button("Cancel") { dismiss() }
+                    .help("Close without saving")
                 Button(editing == nil ? "Add" : "Save", action: commit)
                     .keyboardShortcut(.defaultAction)
                     .disabled(url == nil || name.trimmingCharacters(in: .whitespacesAndNewlines).count < 2)
+                    .help("Save the name, source, and link")
             }
         }
         .padding(16)

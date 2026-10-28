@@ -5,7 +5,7 @@ import SwiftUI
 /// Walks through the library one family at a time to check how AllFontsO filed it.
 /// Least certain guesses come first; confirmed families go to the back, so another round is always possible.
 struct ReviewView: View {
-    @EnvironmentObject private var store: LibraryStore
+    @Environment(LibraryStore.self) private var store
     @Environment(\.dismiss) private var dismiss
     @AppStorage("fontso.sampleText") private var sampleText = SpecimenText.standard
 
@@ -52,7 +52,7 @@ struct ReviewView: View {
         guard queue.indices.contains(position), !roundDone else { return nil }
         // Live faces, so a category changed a moment ago shows at once.
         let name = queue[position].name
-        let faces = store.fonts.filter { $0.family == name }
+        let faces = store.cuts(in: name).filter { $0.family == name }
         guard !faces.isEmpty else { return nil }
         return LibraryStore.ReviewFamily(name: name, faces: faces, reviewedAt: reviewedAt(faces))
     }
@@ -63,7 +63,7 @@ struct ReviewView: View {
     }
 
     private var reviewedCount: Int {
-        queue.filter { family in reviewedAt(store.fonts.filter { $0.family == family.name }) != nil }.count
+        queue.filter { family in reviewedAt(store.cuts(in: family.name).filter { $0.family == family.name }) != nil }.count
     }
 
     private var header: some View {
@@ -314,6 +314,7 @@ struct ReviewView: View {
         } actions: {
             Button("Go round again") { start() }
                 .keyboardShortcut(.defaultAction)
+                .help("Start another round with the least certain families")
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -327,6 +328,7 @@ struct ReviewView: View {
             }
             .keyboardShortcut(.leftArrow, modifiers: [])
             .disabled(position == 0 || roundDone)
+            .help("Back to the previous family (←)")
             Spacer()
             if confirmedFlash {
                 Label("Confirmed", systemImage: "checkmark")
@@ -336,6 +338,7 @@ struct ReviewView: View {
             }
             Button("Close") { dismiss() }
                 .keyboardShortcut(.cancelAction)
+                .help("Close Review")
             Button {
                 skip()
             } label: {

@@ -41,6 +41,7 @@ struct HelpSheet: View {
                 Spacer()
                 Button("Close") { dismiss() }
                     .keyboardShortcut(.cancelAction)
+                    .help("Close the help")
             }
         }
         .padding(24)
@@ -69,8 +70,8 @@ struct HelpSheet: View {
                     "Type your own text, change size (pt, px, rem), tracking, leading, colours, and variable axes. Pin a font so it stays in the preview while you browse others. Info holds the metadata, notes, license, OpenType features to switch on and off, and a character map you can search by character, code point, or Unicode name; clicking a character copies its HTML code. Info is for one font; with several selected, only Adjust stays."
                 )
                 helpBlock(
-                    "Align, Overlay, Playground",
-                    "Align sets fonts on a shared baseline, x-height, or cap height; Overlay lays them over each other in colours. Add a font with Add font… or drop one in. Playground is a free page: several blocks, each with its own font, size, tracking, leading, and padding, hover a block for its controls. Export as PDF or PNG in screen, A4, A3, or a custom size."
+                    "Align, Overlay, Mix, Playground",
+                    "Drag fonts from the library or a list onto the preview to show them there. Used cuts, folded into Adjust (and floating at the foot of the Playground), lists the cuts on screen: pin or unpin them there, take one out, file one or all of them in a list, or drag a card onto a list in the sidebar. Align sets fonts on a shared baseline, x-height, or cap height; Overlay lays them over each other in colours. Add a font with Add font… or drop one in. Mix sets every letter of a word in its own cut: Chosen uses the cuts in the preview, Random deals cuts from the library column, Similar picks families close to the first preview font in x-height, cap height, and letter width. Type straight into the mixed text; size, spacing, and line height are the preview's. Letters take their cut shuffled or in turn; select letters, or drop a font on one, to give them a cut by hand. To Playground adds the mix as a block that keeps every letter's cut, also in the export. In any Playground block, select letters and pick a cut from the letters menu in its toolbar, or drop a font onto the selection. Command-Z steps back through typing and these changes in Mix and Playground. Playground is a free page: several blocks, each with its own font, size, tracking, leading, and padding, hover a block for its controls. Export as PDF or PNG in screen, A4, A3, or a custom size."
                 )
                 helpBlock(
                     "Shape, News, Research",
@@ -91,6 +92,7 @@ struct HelpSheet: View {
                         "office@humansinprocess.biz",
                         destination: URL(string: "mailto:office@humansinprocess.biz")!
                     )
+                    .help("Write an email to Humans In Process")
                 }
             }
             .font(.body)
