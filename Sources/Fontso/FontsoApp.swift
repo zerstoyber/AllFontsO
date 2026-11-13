@@ -18,6 +18,7 @@ struct FontsoApp: App {
         WindowGroup {
             ContentView()
                 .environment(store)
+                .chromeDefaults()
                 .frame(minWidth: 1100, minHeight: 680)
         }
         // The title bar folds into the first column bar; see TitleBarIntegration.
@@ -30,6 +31,7 @@ struct FontsoApp: App {
         Window("Review", id: "review") {
             ReviewView()
                 .environment(store)
+                .chromeDefaults()
         }
         .defaultSize(width: 760, height: 640)
         .defaultPosition(.center)

@@ -70,9 +70,10 @@ struct TitleBarIntegration: NSViewRepresentable {
             observers = []
             window.titleVisibility = .hidden
             window.titlebarAppearsTransparent = true
-            // The column bars draw their own bottom line; the system's title bar separator would double it.
             window.titlebarSeparatorStyle = .none
             window.styleMask.insert(.fullSizeContentView)
+            window.backgroundColor = AppChrome.windowNS
+            window.isOpaque = true
             chrome.fullScreen = window.styleMask.contains(.fullScreen)
             let center = NotificationCenter.default
             let relayout: [Notification.Name] = [
@@ -105,7 +106,7 @@ struct TitleBarIntegration: NSViewRepresentable {
                   let titlebar = close.superview,
                   let container = titlebar.superview,
                   let frameView = container.superview else { return }
-            let barHeight = ColumnBarMetrics.height
+            let barHeight = AppChrome.titleBarHeight
             var frame = container.frame
             frame.size.height = barHeight
             frame.origin.y = frameView.bounds.height - barHeight

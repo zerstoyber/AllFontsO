@@ -6,11 +6,15 @@ import WebKit
 
 struct FoundryPageView: View {
     var url: URL
-    @State private var status = FoundryPageStatus()
+    /// The page's state for a view around it, which then knows the page reached by clicking and can go back.
+    var shared: Binding<FoundryPageStatus>? = nil
+    @State private var own = FoundryPageStatus()
 
     var body: some View {
+        let binding = shared ?? $own
+        let status = binding.wrappedValue
         VStack(spacing: 0) {
-            FoundryWebView(url: url, status: $status)
+            FoundryWebView(url: url, status: binding)
             if status.failure != nil || status.loading {
                 HStack(spacing: 8) {
                     if status.loading {
@@ -21,14 +25,14 @@ struct FoundryPageView: View {
                             .lineLimit(2)
                     }
                     Spacer(minLength: 4)
-                    Button("Reload") { status.reloadToken += 1 }
-                        .buttonStyle(.borderless)
+                    Button("Reload") { binding.wrappedValue.reloadToken += 1 }
+                        .buttonStyle(.paper)
                         .help("Load the page again")
                     Button("Open in browser") { NSWorkspace.shared.open(url) }
-                        .buttonStyle(.borderless)
+                        .buttonStyle(.paper)
                         .help("Open the page in your browser")
                 }
-                .font(.caption)
+                .font(.uiCaption)
                 .foregroundStyle(.secondary)
                 .padding(.horizontal, 10)
                 .padding(.vertical, 6)
@@ -42,6 +46,24 @@ struct FoundryPageStatus: Equatable {
     var loading = false
     var failure: String?
     var reloadToken = 0
+    /// The page shown now: the one opened, or one reached by clicking around in it.
+    var current: URL?
+    var canGoBack = false
+    var backToken = 0
+
+    /// The page reached by clicking around, when it is another one than `page`. Http and https, www, and a slash
+    /// at the end make no other page.
+    func reached(from page: URL) -> URL? {
+        guard let current, current.scheme?.hasPrefix("http") == true else { return nil }
+        func key(_ url: URL) -> String {
+            var host = url.host?.lowercased() ?? ""
+            if host.hasPrefix("www.") { host.removeFirst(4) }
+            var path = url.path
+            while path.hasSuffix("/") { path.removeLast() }
+            return host + path + "?" + (url.query ?? "")
+        }
+        return key(current) == key(page) ? nil : current
+    }
 }
 
 private struct FoundryWebView: NSViewRepresentable {
@@ -62,7 +84,12 @@ private struct FoundryWebView: NSViewRepresentable {
         view.navigationDelegate = context.coordinator
         view.uiDelegate = context.coordinator
         view.allowsBackForwardNavigationGestures = true
-        load(url, in: view, coordinator: context.coordinator)
+        let coordinator = context.coordinator
+        coordinator.watching = [
+            view.observe(\.url) { [weak coordinator] view, _ in coordinator?.moved(view) },
+            view.observe(\.canGoBack) { [weak coordinator] view, _ in coordinator?.moved(view) }
+        ]
+        load(url, in: view, coordinator: coordinator)
         return view
     }
 
@@ -73,13 +100,26 @@ private struct FoundryWebView: NSViewRepresentable {
             load(url, in: view, coordinator: context.coordinator)
             return
         }
+        if context.coordinator.backToken != status.backToken {
+            context.coordinator.backToken = status.backToken
+            view.goBack()
+            return
+        }
         guard context.coordinator.loaded != url else { return }
+        // The page reached by clicking was made the link: it is on show already.
+        if let shown = view.url, FoundryPageStatus(current: shown).reached(from: url) == nil {
+            context.coordinator.loaded = url
+            return
+        }
         load(url, in: view, coordinator: context.coordinator)
     }
 
     private func load(_ url: URL, in view: WKWebView, coordinator: Coordinator) {
         coordinator.loaded = url
-        var request = URLRequest(url: url, timeoutInterval: 30)
+        // Over https first: macOS refuses plain http outside a web page, and nearly every foundry answers there.
+        let secure = FoundryLookup.secure(url)
+        coordinator.fallback = secure == url ? nil : url
+        var request = URLRequest(url: secure, timeoutInterval: 30)
         request.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15", forHTTPHeaderField: "User-Agent")
         view.load(request)
     }
@@ -87,6 +127,10 @@ private struct FoundryWebView: NSViewRepresentable {
     final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
         var loaded: URL?
         var reloadToken = 0
+        var backToken = 0
+        /// The address as the foundry gave it, over http, for the few sites that have no https.
+        var fallback: URL?
+        var watching: [NSKeyValueObservation] = []
         var status: Binding<FoundryPageStatus>
 
         init(status: Binding<FoundryPageStatus>) {
@@ -106,7 +150,19 @@ private struct FoundryWebView: NSViewRepresentable {
         }
 
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+            if let plain = fallback, (error as NSError).code != NSURLErrorCancelled {
+                fallback = nil
+                webView.load(URLRequest(url: plain, timeoutInterval: 30))
+                return
+            }
             report(error)
+        }
+
+        /// The page changed, by a link or by the site itself, or there is now a page to go back to.
+        func moved(_ webView: WKWebView) {
+            let url = webView.url
+            let back = webView.canGoBack
+            update { $0.current = url; $0.canGoBack = back }
         }
 
         func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
@@ -143,105 +199,54 @@ private struct FoundryWebView: NSViewRepresentable {
     }
 }
 
-struct SpecimenPicture: View {
-    var item: OutsideFont?
-    var url: URL?
-    var height: CGFloat = 220
-    @Environment(LibraryStore.self) private var store
-    @State private var gaveUp = false
-
-    private var imageURL: URL? { url ?? item?.imageURL }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            if let imageURL {
-                AsyncImage(url: imageURL) { phase in
-                    switch phase {
-                    case .success(let image):
-                        image
-                            .resizable()
-                            .scaledToFit()
-                            .frame(maxWidth: .infinity, maxHeight: height, alignment: .leading)
-                    case .failure:
-                        EmptyView()
-                    default:
-                        ProgressView()
-                            .controlSize(.small)
-                            .frame(height: 28, alignment: .leading)
-                    }
-                }
-                if item != nil {
-                    Text("Specimen picture from Typecache. The font file is not downloaded.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            } else if let item, !gaveUp {
-                HStack(spacing: 8) {
-                    ProgressView().controlSize(.small)
-                    Text("Looking for a specimen picture…")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                .task(id: item.id) {
-                    await store.attachSpecimen(to: item)
-                    if store.outsideSelection.first(where: { $0.id == item.id })?.imageURL == nil {
-                        gaveUp = true
-                    }
-                }
-            } else if item != nil {
-                Text("Typecache has no specimen picture for this name. The font file is not downloaded.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-    }
-}
-
 struct SpecimenView: View {
+    /// The workspace on the right, or the Info panel under the navigation. Info reuses the sections and their
+    /// state handling here, set on the chrome instead of the paper.
+    enum Role {
+        case workspace
+        case info
+    }
+
+    var role = Role.workspace
+    /// The most room Info may take, so the navigation above keeps its share.
+    var infoLimit: CGFloat = 600
     @Environment(LibraryStore.self) private var store
     @AppStorage("fontso.sampleText") private var specimenText = SpecimenText.standard
     @AppStorage("fontso.specimenSize") private var specimenSize = 48.0
     @AppStorage("fontso.specimen.unit") private var unitRaw = SpecimenUnit.point.rawValue
     @AppStorage("fontso.specimen.tracking") private var tracking = 0.0
     @AppStorage("fontso.specimen.leading") private var leading = 1.2
-    @AppStorage("fontso.specimen.background") private var backgroundHex = "F6F3EE"
-    @AppStorage("fontso.specimen.foreground") private var foregroundHex = "212121"
-    @State private var variations: [UInt32: Double] = [:]
+    @ObservedObject private var theme = PaperSettings.shared
     @State private var editorHeights: [Int64: CGFloat] = [:]
     @State private var activeSourcePath = ""
-    @State private var metadataOpen = false
-    @State private var infoOpen = false
-    @State private var listsOpen = false
+    @AppStorage("fontso.info.metadata") private var metadataOpen = true
+    @AppStorage("fontso.info.activation") private var infoOpen = true
+    @AppStorage("fontso.info.lists") private var listsOpen = false
     @State private var fileWholeFamily = true
-    @State private var notesOpen = false
-    @State private var licenseOpen = false
+    @AppStorage("fontso.info.notes") private var notesOpen = false
+    @AppStorage("fontso.info.license") private var licenseOpen = false
     @State private var licenseWholeFamily = false
-    @State private var charactersOpen = false
-    @State private var featuresOpen = false
+    @State private var licenseDraft = ""
+    @AppStorage("fontso.info.characters") private var charactersOpen = false
+    @AppStorage("fontso.info.features") private var featuresOpen = false
     @State private var glyphScalars: [UnicodeScalar] = []
     @State private var glyphTotal = 0
     @State private var glyphsLoaded = false
     @State private var copiedCode = ""
-    @State private var panel = PreviewPanel.adjust
     @AppStorage("fontso.inspectorOpen") private var inspectorOpen = true
-    @AppStorage("fontso.previewCollapsed") private var previewCollapsed = false
-    @AppStorage("fontso.playgroundOpen") private var playgroundOpen = false
-    @AppStorage("fontso.mixOpen") private var mixOpen = false
+    @AppStorage("fontso.infoHeight") private var infoHeight = 340.0
+    @State private var infoDragStart: Double?
     @State private var colorsOpen = false
-    @Environment(\.barLeadingInset) private var barLeadingInset
-    /// Feature switches moved away from the font's defaults, by feature id. Shared by every font in the preview,
-    /// so "small caps on" carries over when comparing.
-    @State private var featureOverrides: [String: Bool] = [:]
+    /// Families whose cuts are folded open (or, when a single family fills the preview, folded shut).
+    @State private var toggledFamilies: Set<String> = []
     @State private var characterQuery = ""
-    @State private var alignOpen = false
-    @State private var overlayOpen = false
+    @State private var typedQuery = ""
     @State private var editingOutside: OutsideFont?
+    @State private var addingLink = false
     @State private var inspectorHeight: CGFloat = 220
-    @State private var overlayFocus: Int64?
     @State private var referenceID: Int64?
     @State private var alignShifts: [Int64: CGFloat] = [:]
+    @State private var alignSnap: AlignSnap?
     @State private var alignCanvasHeight: CGFloat = 240
     @State private var overlayColorHex: [Int64: String] = [:]
     @State private var previewOrder: [Int64] = []
@@ -258,53 +263,73 @@ struct SpecimenView: View {
         ("White", NSColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.8))
     ]
     @State private var overlayColorFor: Int64?
+    /// The pinned fonts large across the dock. Preview and Playground share the choice.
+    @AppStorage("fontso.pinned.large.dock") private var dockPinnedLarge = false
 
     private let previewLimit = 24
 
+    /// Feature switches moved away from the font's defaults. Kept in the store, so the switches in Info reach the preview.
+    private var featureOverrides: [String: Bool] {
+        get { store.featureOverrides }
+        nonmutating set { store.featureOverrides = newValue }
+    }
+
     var body: some View {
-        let faces = arranged(store.previewFaces)
+        if role == .info {
+            infoPanel
+        } else {
+            workspaceBody
+        }
+    }
+
+    @ViewBuilder
+    private var workspaceBody: some View {
+        let source = store.previewFaces
+        let working = store.workingFaces
+        let faces = store.workspaceTab == .preview ? source : working
         VStack(spacing: 0) {
             previewColumnBar(faces)
-            if playgroundOpen {
+            if store.workspaceTab == .shape {
+                ShapeView()
+            } else if store.workspaceTab == .playground {
                 PlaygroundView()
                     .paperColors(ink: ink, paper: Color(nsColor: paper))
-            } else if mixOpen {
-                LetterMixView()
+            } else if store.workspaceTab == .compare {
+                compareWorkspace(working)
                     .paperColors(ink: ink, paper: Color(nsColor: paper))
+            } else if faces.isEmpty, store.isViewingList,
+                      !store.previewListLinks.isEmpty || (store.outsideSelection.isEmpty && !store.narrowsView) {
+                // A list without library fonts: only links to fonts outside the library, or nothing yet.
+                ColumnScroll {
+                    VStack(alignment: .leading, spacing: 12) {
+                        if store.previewListLinks.isEmpty {
+                            Text("This list is empty. Drag fonts from the navigation or the preview onto the list to fill it.")
+                                .font(AppChrome.type())
+                                .foregroundStyle(tone.half)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .padding(.leading, 2)
+                                .padding(.bottom, 8)
+                        } else if store.narrowsView {
+                            narrowedNotice
+                        }
+                        listLinkStack(store.previewListLinks)
+                    }
+                    .padding(.leading, 16)
+                    .padding(.trailing, 9)
+                    .padding(.vertical, 12)
+                }
+                .paperColors(ink: ink, paper: Color(nsColor: paper))
+            } else if faces.isEmpty, store.outsideSelection.isEmpty, store.narrowsView {
+                narrowedEmpty
             } else if faces.isEmpty && store.outsideSelection.isEmpty {
                 ContentUnavailableView {
-                    Label("Specimen", systemImage: "doc.richtext")
+                    Text(store.isViewingList ? "This list is empty" : "No fonts here")
                 } description: {
-                    Text(mode == .preview
-                        ? "Select a font for the preview, metadata, and activation."
-                        : "\(mode.title) needs fonts. Select them in the library, drop them here, or add them.")
-                } actions: {
-                    AddFontButton(title: "Add font…")
+                    Text(store.isViewingList
+                        ? "Drag fonts from the navigation or the preview onto the list to fill it."
+                        : "Click a list or a library view in the navigation to stack its fonts here.")
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .dropDestination(for: FontDragItem.self) { items, _ in
-                    store.addToPreview(items.flatMap(\.identities))
-                }
-            } else if faces.isEmpty && (alignOpen || overlayOpen) {
-                // A news item is a web page, not a font file: nothing to set on a baseline or lay over another.
-                ContentUnavailableView {
-                    Label("\(mode.title) works with fonts from the library", systemImage: mode.symbol)
-                } description: {
-                    Text(store.outsideSelection.isEmpty
-                        ? "Select fonts in the library, drop them here, or add them."
-                        : "A news item is a web preview, so it cannot be aligned or overlaid. Select fonts in the library, drop them here, or add them.")
-                } actions: {
-                    HStack {
-                        AddFontButton(title: "Add font…")
-                        Button("Back to Preview") { select(.preview, faces: faces) }
-                            .controlSize(.small)
-                            .help("Back to the plain preview")
-                    }
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .dropDestination(for: FontDragItem.self) { items, _ in
-                    store.addToPreview(items.flatMap(\.identities))
-                }
             } else if faces.isEmpty && store.outsideSelection.count == 1, let item = store.outsideSelection.first {
                 outsideFocus(item)
                     .paperColors(ink: ink, paper: Color(nsColor: paper))
@@ -320,8 +345,11 @@ struct SpecimenView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .onChange(of: store.previewFaces.map(\.id)) { _, ids in
-            reconcilePreviewOrder(ids)
+        .onChange(of: store.pinnedIdentities) { _, _ in
+            reconcilePreviewOrder(store.workingFaces.map(\.id))
+        }
+        .onAppear {
+            typedQuery = store.query
         }
         .sheet(item: $editingOutside) { item in
             OutsideFontForm(editing: item) { name, source, url in
@@ -330,184 +358,553 @@ struct SpecimenView: View {
         }
     }
 
-    /// Which of the preview modes is showing.
-    private enum PreviewMode: String, CaseIterable, Identifiable {
-        case preview, align, overlay, mix, playground
+    /// The same, as one line above the fonts from the news, which no filter hides.
+    private var narrowedNotice: some View {
+        let names = store.activeFilterNames
+        return HStack(spacing: 8) {
+            Text(names.isEmpty
+                ? "No library font of this list matches the search."
+                : "The filter (\(names.joined(separator: ", "))) hides the library fonts of this list.")
+                .font(AppChrome.small)
+                .foregroundStyle(tone.half)
+                .lineLimit(1)
+            if !names.isEmpty {
+                Button {
+                    store.clearFilters()
+                } label: {
+                    Label("Reset filter", systemImage: "arrow.counterclockwise")
+                }
+                .buttonStyle(.chip())
+                .help("Switch every filter off")
+            }
+            Spacer(minLength: 0)
+        }
+    }
+
+    /// The view has fonts, but the search or a filter holds all of them back. The way out is one click.
+    private var narrowedEmpty: some View {
+        let names = store.activeFilterNames
+        let searching = !store.query.isEmpty
+        return ContentUnavailableView {
+            Text(names.isEmpty ? "No font matches the search" : "The filter hides every font here")
+        } description: {
+            VStack(spacing: 4) {
+                if !names.isEmpty {
+                    Text("Filter on: \(names.joined(separator: ", ")).")
+                }
+                if searching {
+                    Text("Search: “\(store.query)”.")
+                }
+            }
+        } actions: {
+            HStack(spacing: 8) {
+                if !names.isEmpty {
+                    Button {
+                        store.clearFilters()
+                    } label: {
+                        Label("Reset filter", systemImage: "arrow.counterclockwise")
+                    }
+                    .buttonStyle(.chip())
+                    .help("Switch every filter off and show all fonts of \(store.filterTitle)")
+                }
+                if searching {
+                    Button {
+                        typedQuery = ""
+                        store.query = ""
+                    } label: {
+                        Label("Clear search", systemImage: "xmark")
+                    }
+                    .buttonStyle(.chip())
+                    .help("Empty the search field")
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var overlayOpen: Bool { store.workspaceTab == .compare && store.compareMode == .overlay }
+    private var alignOpen: Bool { store.workspaceTab == .compare && store.compareMode == .align }
+
+    /// Workspace tabs, then search, sort, and filter.
+    private func previewColumnBar(_ faces: [FontFace]) -> some View {
+        VStack(spacing: 0) {
+            workspaceTabs(faces)
+            // Search, sort, and filter belong to Preview, where they arrange the list on show.
+            if store.workspaceTab == .preview {
+                HStack(spacing: 8) {
+                    searchField
+                    sortMenu
+                    filterMenu
+                    if store.activeFilterCount > 0 {
+                        IconChip(
+                            symbol: "arrow.counterclockwise",
+                            help: "Reset the filter (\(store.activeFilterNames.joined(separator: ", ")))"
+                        ) {
+                            store.clearFilters()
+                        }
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+                Rectangle()
+                    .fill(tone.hairline)
+                    .frame(height: 0.5)
+            }
+        }
+    }
+
+    // MARK: Compare
+
+    /// Compare: the pinned fonts in a row at the top, as in Shape, then Align or Overlay with their settings, then
+    /// the board. The pinned card that is clicked is the font the others line up to.
+    private func compareWorkspace(_ faces: [FontFace]) -> some View {
+        let shown = Array(faces.prefix(previewLimit))
+        return VStack(spacing: 0) {
+            PinnedBar(
+                reference: referenceFace(shown),
+                referenceTitle: "Lines up to",
+                pickHelp: "Search the library and pin a font to compare",
+                emptyNote: "Pin two or more fonts in Preview, or drag them here from the navigation. Align sets them side by side on one baseline, Overlay lays them over each other. The pinned font you click is the one the others line up to.",
+                onChoose: { face in
+                    referenceID = face.id
+                    // A chosen snap follows the new reference.
+                    if let alignSnap { snapAlign(shown, to: alignSnap) }
+                },
+                onPick: { face in store.addToPreview([face.identity]) },
+                // In Overlay every pinned font carries its colour, so the board needs no second row of names.
+                swatch: store.compareMode == .overlay && shown.count > 1
+                    ? { face in
+                        guard let index = shown.firstIndex(where: { $0.id == face.id }) else { return AnyView(EmptyView()) }
+                        return AnyView(overlaySwatch(face, index: index))
+                    }
+                    : nil
+            )
+            Rectangle()
+                .fill(tone.hairline)
+                .frame(height: 0.5)
+            SubNavigation(
+                items: CompareMode.allCases.map { .init(title: $0.title, value: $0, help: $0.help) },
+                selection: Bindable(store).compareMode
+            )
+            compareBar(shown)
+                .settingsBar()
+            if shown.count < 2 {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(shown.isEmpty ? "Nothing pinned yet" : "One more font")
+                        .font(AppChrome.type(12, weight: .medium))
+                        .foregroundStyle(tone.ink)
+                    Text(shown.isEmpty
+                        ? "Compare works with the pinned fonts. Pin two in Preview, use Pin font above, or drag fonts here from the navigation."
+                        : "Compare needs two pinned fonts. Pin another in Preview, use Pin font above, or drag one here from the navigation.")
+                        .font(AppChrome.small)
+                        .foregroundStyle(tone.half)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(16)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .contentShape(Rectangle())
+                .dropDestination(for: FontDragItem.self) { items, _ in
+                    store.addToPreview(items.flatMap(\.identities))
+                }
+            } else {
+                specimen(faces)
+            }
+        }
+    }
+
+    /// The settings of Align and Overlay: the two snaps and the way back. A snap stays lit until a font is moved
+    /// by hand. The fonts go to the Playground from the three dots beside the pinned fonts.
+    private func compareBar(_ faces: [FontFace]) -> some View {
+        HStack(spacing: 8) {
+            ForEach(AlignSnap.allCases) { snap in
+                Button(snap.title) {
+                    if alignSnap == snap {
+                        alignSnap = nil
+                        alignShifts = [:]
+                    } else {
+                        snapAlign(faces, to: snap)
+                    }
+                }
+                .buttonStyle(.chip(on: alignSnap == snap))
+                .disabled(faces.count < 2)
+                .help(alignSnap == snap
+                    ? "The \(snap.title.lowercased())s meet the reference. Click to let go."
+                    : "Shift the fonts so their \(snap.title.lowercased())s meet the reference")
+            }
+            IconChip(symbol: "arrow.counterclockwise", help: "Reset the alignment: every font back on the baseline") {
+                alignSnap = nil
+                alignShifts = [:]
+            }
+            .disabled(alignShifts.isEmpty)
+            if faces.count > 1 {
+                Text(store.compareMode == .align ? "Drag a font up or down." : "Click a pinned font, then drag it up or down. The dot on a pinned font sets its colour.")
+                    .font(AppChrome.small)
+                    .foregroundStyle(tone.muted)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 0)
+        }
+    }
+
+    /// What the fonts are shifted to meet.
+    private enum AlignSnap: String, CaseIterable, Identifiable {
+        case xHeight, capHeight
         var id: String { rawValue }
 
         var title: String {
             switch self {
-            case .preview: return "Preview"
-            case .align: return "Align"
-            case .overlay: return "Overlay"
-            case .mix: return "Mix"
-            case .playground: return "Playground"
-            }
-        }
-
-        var symbol: String {
-            switch self {
-            case .preview: return "text.alignleft"
-            case .align: return "rectangle.split.2x1"
-            case .overlay: return "square.on.square"
-            case .mix: return "dice"
-            case .playground: return "square.text.square"
-            }
-        }
-
-        var help: String {
-            switch self {
-            case .preview: return "Preview: each font on its own, with Adjust and Info"
-            case .align: return "Align: fonts side by side on one baseline, to compare x-height and cap height"
-            case .overlay: return "Overlay: fonts laid on top of each other"
-            case .mix: return "Mix: every letter in its own cut, chosen by you, at random, or close in x-height and width"
-            case .playground: return "Playground: mix fonts in text blocks, each with its own size, tracking, and leading"
+            case .xHeight: return "X-height"
+            case .capHeight: return "Cap height"
             }
         }
     }
 
-    private var mode: PreviewMode {
-        if playgroundOpen { return .playground }
-        if mixOpen { return .mix }
-        if overlayOpen { return .overlay }
-        if alignOpen { return .align }
-        return .preview
+    private func snapAlign(_ faces: [FontFace], to snap: AlignSnap) {
+        switch snap {
+        case .xHeight: snapAlign(faces, metric: CTFontGetXHeight)
+        case .capHeight: snapAlign(faces, metric: CTFontGetCapHeight)
+        }
+        alignSnap = snap
     }
 
-    private func select(_ mode: PreviewMode, faces: [FontFace]) {
-        playgroundOpen = mode == .playground
-        mixOpen = mode == .mix
-        alignOpen = mode == .align
-        overlayOpen = mode == .overlay
-        if mode == .overlay, overlayFocus == nil {
-            overlayFocus = faces.dropFirst().first?.id ?? faces.first?.id
+    /// The four tabs of the sketch: labels at the left of equal cells, hairlines between them, and a line under
+    /// every tab except the open one, so the open tab runs into the content below.
+    private func workspaceTabs(_ faces: [FontFace]) -> some View {
+        HStack(spacing: 0) {
+            ForEach(WorkspaceTab.allCases) { tab in
+                WorkspaceTabCell(title: tab.title, active: store.workspaceTab == tab, onFonts: { identities in
+                    dropOnTab(tab, identities: identities)
+                }) {
+                    store.workspaceTab = tab
+                }
+                .help("\(tab.help). Drop a font here to use it in \(tab.title).")
+            }
+            HStack(spacing: 8) {
+                if store.workspaceTab == .playground {
+                    Button("Export") {
+                        NotificationCenter.default.post(name: .fontsoPlaygroundExport, object: nil)
+                    }
+                    .buttonStyle(.chip())
+                    .help("Export the playground as PDF or PNG: screen, A4, A3, or a custom page")
+                }
+                colorButton
+            }
+            .padding(.horizontal, 12)
+            // A fixed field for the buttons, so the four tabs keep the same width in every mode.
+            .frame(width: 148, height: 27, alignment: .trailing)
+            .overlay(alignment: .bottom) {
+                Rectangle().fill(tone.hairline).frame(height: 0.5)
+            }
         }
     }
 
-    /// The mode switch on the left, always showing all four modes; view controls (colours, export, size, hide) on the right.
-    private func previewColumnBar(_ faces: [FontFace]) -> some View {
-        HStack(spacing: 8) {
-            ViewThatFits(in: .horizontal) {
-                modeSwitch(faces, labels: true)
-                modeSwitch(faces, labels: false)
-            }
-            if faces.count > 1, mode != .playground {
-                Text("\(min(faces.count, previewLimit))")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-            }
-            if !store.pinnedIdentities.isEmpty, mode != .playground {
-                Button {
-                    store.unpinAll()
-                } label: {
-                    Label("\(store.pinnedIdentities.count)", systemImage: "pin.fill")
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(Color.accentColor)
+    /// A font dragged from the navigation onto a tab: pinned for Preview, Compare, and Shape, set as a new block in
+    /// Playground. The tab opens, so the font is seen where it landed.
+    private func dropOnTab(_ tab: WorkspaceTab, identities: [String]) -> Bool {
+        let valid = identities.filter { store.hasFace(identity: $0) }
+        guard !valid.isEmpty else { return false }
+        if tab == .playground {
+            store.addToPlayground(valid)
+        } else {
+            store.addToPreview(valid)
+        }
+        if tab != .preview {
+            store.workspaceTab = tab
+        }
+        return true
+    }
+
+    private var searchField: some View {
+        HStack(spacing: 6) {
+            TextField("Family, style, foundry", text: $typedQuery)
+                .textFieldStyle(.plain)
+                .font(AppChrome.type())
+                .foregroundStyle(tone.ink)
+                .onSubmit { store.query = typedQuery }
+                .task(id: typedQuery) {
+                    guard typedQuery != store.query else { return }
+                    if typedQuery.isEmpty {
+                        store.query = ""
+                        return
+                    }
+                    try? await Task.sleep(nanoseconds: 450_000_000)
+                    if !Task.isCancelled, typedQuery != store.query {
+                        store.query = typedQuery
+                    }
                 }
-                .buttonStyle(.plain)
-                .help("\(store.pinnedIdentities.count) pinned in the preview. Click to unpin all.")
-            }
-            Spacer(minLength: 8)
-            colorButton
-            if playgroundOpen {
-                Button {
-                    NotificationCenter.default.post(name: .fontsoPlaygroundExport, object: nil)
-                } label: {
-                    Image(systemName: "square.and.arrow.up")
+                .onChange(of: store.query) { _, query in
+                    if query != typedQuery { typedQuery = query }
                 }
-                .buttonStyle(.borderless)
-                .help("Export the playground as PDF or PNG: screen, A4, A3, or a custom page")
-            }
-            previewSizeButton
-            if !store.previewExpanded {
-                Button {
-                    previewCollapsed = true
-                } label: {
-                    Image(systemName: "sidebar.right")
+            if !typedQuery.isEmpty {
+                Button("Clear") {
+                    typedQuery = ""
+                    store.query = ""
                 }
-                .buttonStyle(.borderless)
-                .help("Hide the preview")
+                .buttonStyle(.chip())
+                .help("Clear the search")
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.leading, barLeadingInset)
-        .frame(height: ColumnBarMetrics.height)
-        .background(Color(nsColor: .windowBackgroundColor))
-        .background(WindowDragArea())
-        .overlay(alignment: .bottom) {
-            Rectangle()
-                .fill(Color.primary.opacity(0.12))
-                .frame(height: 1)
+        .padding(.leading, 20)
+        .padding(.trailing, 8)
+        .frame(maxWidth: .infinity)
+        .frame(height: 26)
+        .background(tone.field, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .help("Search the current list or library view")
+    }
+
+
+    private var sortMenu: some View {
+        Menu {
+            if store.isViewingList {
+                Section("Order") {
+                    sortChoice(.custom)
+                    ForEach(LibrarySort.orderSection) { sortChoice($0) }
+                }
+            } else {
+                Section("Order") {
+                    ForEach(LibrarySort.orderSection) { sortChoice($0) }
+                }
+            }
+            Section("Letterform") {
+                ForEach(LibrarySort.letterformSection) { sortChoice($0) }
+            }
+            Section("File") {
+                ForEach(LibrarySort.fileSection) { sortChoice($0) }
+            }
+            Section("Direction") {
+                ForEach([true, false], id: \.self) { ascending in
+                    Button {
+                        store.sortAscending = ascending
+                    } label: {
+                        if store.sortAscending == ascending {
+                            Label(store.sort.directionTitle(ascending: ascending), systemImage: "checkmark")
+                        } else {
+                            Text(store.sort.directionTitle(ascending: ascending))
+                        }
+                    }
+                }
+            }
+        } label: {
+            Text("Sort")
         }
+        .chromeMenuChip()
+        .help(store.sort.hint)
+    }
+
+    private func sortChoice(_ item: LibrarySort) -> some View {
+        Button {
+            store.sort = item
+        } label: {
+            if store.sort == item {
+                Label(item.title, systemImage: "checkmark")
+            } else {
+                Text(item.title)
+            }
+        }
+    }
+
+    private var filterMenu: some View {
+        Menu {
+            Toggle("Hide trials", isOn: Binding(get: { !store.showTrials }, set: { store.showTrials = !$0 }))
+            Toggle("Only active", isOn: Bindable(store).onlyActive)
+            Toggle("Only variable", isOn: Bindable(store).onlyVariable)
+            Toggle("Only licensed", isOn: Bindable(store).onlyLicensed)
+            Divider()
+            Picker("Format", selection: Bindable(store).formatFilter) {
+                ForEach(FormatFilter.allCases) { format in
+                    Text(format.title).tag(format)
+                }
+            }
+            .pickerStyle(.inline)
+            if store.activeFilterCount > 0 {
+                Divider()
+                Button("Clear filters") { store.clearFilters() }
+            }
+        } label: {
+            Text(store.activeFilterCount > 0 ? "Filter · \(store.activeFilterCount)" : "Filter")
+        }
+        .chromeMenuChip()
+        .help("Hide trials, keep only active, variable, licensed, or a format")
     }
 
     private func specimen(_ faces: [FontFace]) -> some View {
-        let face = faces[0]
-        return ZStack(alignment: .bottom) {
-            ColumnScroll(
-                resetID: "\(store.filterTitle)-\(faces.map { String($0.id) }.joined(separator: ","))",
-                bottomInset: inspectorHeight + 28
-            ) {
-                previewStack(faces)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            }
-            .background(Color(nsColor: paper))
-            HStack(spacing: 0) {
-                Spacer(minLength: 10)
-                Group {
-                    if inspectorOpen {
-                        previewInspector(faces)
-                            .frame(maxWidth: .infinity)
-                    } else {
-                        Button {
-                            inspectorOpen = true
-                        } label: {
-                            Label(
-                                faces.count == 1 && panel == .info ? "Info" : "Adjust",
-                                systemImage: "slider.horizontal.3"
-                            )
-                                .font(.caption.weight(.semibold))
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 8)
+        ZStack(alignment: .bottom) {
+            Group {
+                if store.workspaceTab == .preview {
+                    ScrollViewReader { scroll in
+                        ScrollView {
+                            previewStack(faces)
+                                .frame(maxWidth: .infinity, alignment: .topLeading)
+                            Color.clear.frame(height: inspectorHeight + 28)
                         }
-                        .buttonStyle(.plain)
-                        .foregroundStyle(ink)
-                        .background(Color(nsColor: paper), in: Capsule())
-                        .overlay(Capsule().stroke(ink.opacity(0.18)))
-                        .shadow(color: Color.black.opacity(0.16), radius: 10, y: 4)
-                        .help(faces.count == 1 ? "Show Adjust and Info" : "Show Adjust")
+                        .onChange(of: store.focusPreviewID) { _, id in
+                            guard let id else { return }
+                            store.focusPreviewID = nil
+                            let groups = clusters(faces)
+                            guard let cluster = groups.first(where: { group in group.faces.contains { $0.id == id } }) else { return }
+                            // A folded family shows one cut; open it when another of its cuts is asked for.
+                            if cluster.faces.count > 1, !isOpen(cluster, alone: opensFamilies(groups)), leadFace(cluster.faces).id != id {
+                                toggledFamilies.formSymmetricDifference([cluster.id])
+                            }
+                            scroll.scrollTo(cluster.id, anchor: .top)
+                            DispatchQueue.main.async {
+                                scroll.scrollTo(id, anchor: .top)
+                            }
+                        }
+                        // A font from the news clicked in the navigation: its card stands under the library fonts.
+                        .onChange(of: store.outsideSelection.first?.nameKey, initial: true) { _, id in
+                            guard let id, store.previewListLinks.contains(where: { $0.nameKey == id }) else { return }
+                            // First to the block of news fonts, which the lazy stack knows; then to the card itself.
+                            DispatchQueue.main.async {
+                                scroll.scrollTo("list-links", anchor: .top)
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                                    scroll.scrollTo("link-\(id)", anchor: .top)
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    ColumnScroll(
+                        resetID: "\(store.filterTitle)-\(faces.map { String($0.id) }.joined(separator: ","))",
+                        bottomInset: inspectorHeight + 28
+                    ) {
+                        previewStack(faces)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     }
                 }
-                .frame(maxWidth: 720)
-                Spacer(minLength: 10)
             }
+            Group {
+                if inspectorOpen {
+                    previewInspector(faces)
+                } else {
+                    DockPill(
+                        title: store.workspaceTab == .preview ? "Text · Adjust · Pinned" : "Text · Adjust",
+                        help: store.workspaceTab == .preview ? "Show sample text, size, and pinned fonts" : "Show sample text and size"
+                    ) {
+                        inspectorOpen = true
+                    }
+                }
+            }
+            .padding(.horizontal, AppChrome.dockInset)
             .padding(.bottom, 12)
-            .environment(\.colorScheme, paperIsDark ? .dark : .light)
             .reportOverlayHeight()
         }
         .onPreferenceChange(OverlayHeightKey.self) { inspectorHeight = $0 }
-        .onChange(of: face.id) { _, _ in
-            variations = [:]
+    }
+
+    /// The dock of the sketch: Text, Adjust, and Pinned side by side on a blurred strip, with hairlines between.
+    /// Each of the three folds to its title.
+    private func previewInspector(_ faces: [FontFace]) -> some View {
+        let face = faces[0]
+        let sampleFace = store.selection.first.flatMap { store.face(id: $0) } ?? face
+        return ChromeDock(
+            hideHelp: store.workspaceTab == .preview ? "Hide Text, Adjust, and Pinned" : "Hide Text and Adjust",
+            onHide: { inspectorOpen = false },
+            // Large, the pinned fonts lie across the dock; small, they are one of its sections.
+            above: store.workspaceTab == .preview && dockPinnedLarge ? AnyView(DockPinnedBoard(large: $dockPinnedLarge)) : nil
+        ) {
+            DockSection("Text", key: "text") {
+                SampleChips(text: $specimenText, face: sampleFace)
+            } content: {
+                TextField("Type here", text: $specimenText, axis: .vertical)
+                    .textFieldStyle(.plain)
+                    .font(AppChrome.type())
+                    .foregroundStyle(tone.ink)
+                    .lineLimit(1...3)
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                    .help("The sample text of every font in the preview")
+            }
+            DockSection("Adjust", key: "adjust") {
+                ChromeSegments(
+                    items: SpecimenUnit.allCases.map { .init(title: $0.title, value: $0.rawValue, help: "Size and line height in \($0.title)") },
+                    selection: $unitRaw,
+                    compact: true
+                )
+            } content: {
+                adjustControls
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            // Compare shows the pinned fonts in the row at the top.
+            if store.workspaceTab == .preview, !dockPinnedLarge {
+                DockSection("Pinned", key: "pinned", detail: "\(store.pinnedFaces.count)", onFonts: { store.addToPreview($0) }) {
+                    PinnedSizeChip(large: $dockPinnedLarge)
+                    PinnedMenu()
+                } content: {
+                    PinnedStrip()
+                }
+            }
+        }
+    }
+
+    // MARK: Info under the navigation
+
+    /// Everything about the selected cut: metadata, activation, lists, license, OpenType features, characters, notes.
+    private var infoPanel: some View {
+        let face = store.selection.first.flatMap { store.face(id: $0) }
+        let open = store.infoPanelOpen
+        return VStack(spacing: 0) {
+            infoHandle(active: open && face != nil)
+            VStack(spacing: 0) {
+                Button {
+                    store.infoPanelOpen.toggle()
+                } label: {
+                    HStack(spacing: 6) {
+                        Text("Info")
+                            .foregroundStyle(tone.ink)
+                        Text(face.map { "\($0.family) \($0.style)" } ?? "No font selected")
+                            .foregroundStyle(tone.half)
+                            .lineLimit(1)
+                        Spacer(minLength: 4)
+                        if face != nil {
+                            ChromeChevron(open: open, color: tone.half)
+                        }
+                    }
+                    .font(AppChrome.type())
+                    .padding(.horizontal, 10)
+                    .frame(height: 30)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(face == nil)
+                .help(face == nil
+                    ? "Select a font: click its name, its sample, or Info. Its metadata, lists, license, OpenType features, characters, and notes show here."
+                    : open ? "Fold Info away" : "Show Info for the selected font")
+                if open, let face {
+                    // The title stays; what scrolls under it is set off by a line.
+                    Rectangle()
+                        .fill(tone.hairline)
+                        .frame(height: 0.5)
+                    ScrollView {
+                        infoContent(face)
+                    }
+                    .frame(height: min(infoHeight, infoLimit))
+                }
+            }
+            .chromePanel()
+            // Without a font there is nothing to show: the panel steps back.
+            .opacity(face == nil ? 0.45 : 1)
+        }
+        .paperColors(ink: AppChrome.ink, paper: AppChrome.panel)
+        .onChange(of: face?.id) { _, _ in
             glyphScalars = []
             glyphTotal = 0
             glyphsLoaded = false
             copiedCode = ""
-            if face.category == .unclassified, faces.count == 1 {
+            characterQuery = ""
+            if face?.category == .unclassified {
                 listsOpen = true
-                panel = .info
             }
         }
-        .onChange(of: faces.count) { _, count in
-            if count > 1, panel == .info {
-                panel = .adjust
+        .task(id: face?.postscriptName) {
+            guard let face else {
+                activeSourcePath = ""
+                return
             }
-        }
-        .task(id: face.postscriptName) {
             let path = FontActivator.activeFileURL(postScriptName: face.postscriptName)?.path ?? ""
             activeSourcePath = path == face.filePath ? "" : path
         }
-        .task(id: "\(face.id)|\(charactersOpen)|\(faces.count)") {
-            guard charactersOpen, faces.count == 1 else { return }
+        .task(id: "\(face?.id ?? 0)|\(charactersOpen)|\(open)") {
+            guard charactersOpen, open, let face else { return }
             let path = face.filePath
             let index = face.faceIndex
             // Every character, so the search covers the whole font; the grid shows the first few hundred.
@@ -520,72 +917,133 @@ struct SpecimenView: View {
         }
     }
 
-    private func previewInspector(_ faces: [FontFace]) -> some View {
-        let face = faces[0]
-        let showAxes = faces.count == 1 && face.isVariable && !face.axes.isEmpty
-        let oneFont = faces.count == 1
-        return VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                if oneFont {
-                    Picker("Panel", selection: $panel) {
-                        Text("Adjust").tag(PreviewPanel.adjust)
-                        Text("Info").tag(PreviewPanel.info)
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                    .controlSize(.small)
-                    .help("Adjust sets size and spacing; Info shows the font’s details")
+    private func infoContent(_ face: FontFace) -> some View {
+        // Set like the navigation: titles and rows at its sizes, the parts close together, no lines between them.
+        VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(face.family)
+                    .font(AppChrome.type(12, weight: .medium))
+                    .foregroundStyle(tone.ink)
+                    .lineLimit(2)
+                    .textSelection(.enabled)
+                Text("\(face.style), \(face.format.uppercased())\(face.isVariable ? ", Variable" : "")")
+                    .font(AppChrome.type())
+                    .foregroundStyle(tone.half)
+            }
+            HStack(spacing: 5) {
+                pinButton(face)
+                activationButton(face)
+                playgroundButton(face)
+                Spacer(minLength: 0)
+            }
+            .padding(.top, 6)
+            .padding(.bottom, 6)
+            metadataSection(face)
+            infoSection(face)
+            listSection(face)
+            licenseSection([face])
+            if !FontFeatures.list(filePath: face.filePath, faceIndex: face.faceIndex).isEmpty {
+                featureSection(face)
+            }
+            characterSection(face)
+            notesSection([face])
+            finderSection(face)
+                .padding(.top, 8)
+        }
+        .foregroundStyle(tone.ink)
+        .padding(.horizontal, 10)
+        .padding(.top, 8)
+        .padding(.bottom, 14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// The open space between the navigation and Info. With Info open it is a handle: drag it to give Info more or
+    /// less room.
+    private func infoHandle(active: Bool) -> some View {
+        Color.clear
+            .frame(maxWidth: .infinity)
+            .frame(height: AppChrome.gap)
+            .contentShape(Rectangle())
+            .onHover { inside in
+                guard active else { return }
+                if inside {
+                    NSCursor.resizeUpDown.push()
                 } else {
-                    Text("Adjust")
-                        .font(.caption.weight(.semibold))
-                    Text("Info is for one font.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Spacer(minLength: 0)
+                    NSCursor.pop()
                 }
-                Button {
-                    inspectorOpen = false
-                } label: {
-                    Image(systemName: "chevron.down")
-                        .font(.caption.weight(.semibold))
-                }
-                .buttonStyle(.borderless)
-                .help("Hide Adjust and Info")
             }
-            FittedPanel {
-                VStack(alignment: .leading, spacing: 8) {
-                    if oneFont, panel == .info {
-                        metadataSection(face)
-                        infoSection(face)
-                        listSection(face)
-                        licenseSection(Array(faces.prefix(previewLimit)))
-                        featureSection(face)
-                        characterSection(face)
-                        notesSection(Array(faces.prefix(previewLimit)))
-                        finderSection(face)
-                    } else {
-                        adjustControls(face, showAxes: showAxes)
+            .gesture(
+                DragGesture(coordinateSpace: .global)
+                    .onChanged { drag in
+                        guard active else { return }
+                        let start = infoDragStart ?? min(infoHeight, Double(infoLimit))
+                        infoDragStart = start
+                        infoHeight = min(Double(infoLimit), max(120, start - drag.translation.height))
                     }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            if !(oneFont && panel == .info) {
-                Divider()
-                UsedCutsBand(faces: Array(faces.prefix(previewLimit)), onRemove: { store.removeFromPreview($0) }, embedded: true)
+                    .onEnded { _ in infoDragStart = nil }
+            )
+            .help(active ? "Drag to give Info more or less room" : "")
+    }
+
+    /// Neighbouring cuts of one family, as the cards of the stacked preview.
+    private func clusters(_ faces: [FontFace]) -> [FamilyCluster] {
+        var result: [FamilyCluster] = []
+        for face in faces {
+            if let last = result.indices.last, result[last].family.caseInsensitiveCompare(face.family) == .orderedSame {
+                result[last].faces.append(face)
+            } else {
+                result.append(FamilyCluster(family: face.family, faces: [face]))
             }
         }
-        .padding(8)
-        .background(Color(nsColor: paper), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(ink.opacity(0.18))
-        )
-        .shadow(color: Color.black.opacity(0.14), radius: 14, y: 6)
+        return result
+    }
+
+    /// A library view with several families starts each one folded to a single sample. A family alone in the
+    /// preview starts open, and so do your own lists, where every cut was picked by hand.
+    private func opensFamilies(_ groups: [FamilyCluster]) -> Bool {
+        groups.count == 1 || store.isViewingList
+    }
+
+    private func isOpen(_ cluster: FamilyCluster, alone: Bool) -> Bool {
+        toggledFamilies.contains(cluster.id) != alone
+    }
+
+    /// The cut that stands for a folded family: upright, closest to regular.
+    private func leadFace(_ faces: [FontFace]) -> FontFace {
+        faces.min { lhs, rhs in
+            if lhs.isItalic != rhs.isItalic { return !lhs.isItalic }
+            return abs(lhs.weightClass - 400) < abs(rhs.weightClass - 400)
+        } ?? faces[0]
+    }
+
+    private func clusterCard(_ cluster: FamilyCluster, alone: Bool, first: Bool, count: Int) -> some View {
+        let open = isOpen(cluster, alone: alone)
+        let shown = cluster.faces.count > 1 && !open ? [leadFace(cluster.faces)] : cluster.faces
+        return sliceCard {
+            ForEach(Array(shown.enumerated()), id: \.element.id) { index, face in
+                if index > 0 {
+                    Rectangle()
+                        .fill(tone.stroke)
+                        .frame(height: 0.5)
+                }
+                previewSlice(face, placeholder: first && index == 0, count: count, cluster: cluster, open: open, leads: index == 0)
+                    .id(face.id)
+            }
+        }
+    }
+
+    private func sliceCard<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        let shape = RoundedRectangle(cornerRadius: AppChrome.cardRadius, style: .continuous)
+        return VStack(alignment: .leading, spacing: 0) {
+            content()
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .clipShape(shape)
+        .overlay(shape.stroke(tone.stroke, lineWidth: 0.5))
     }
 
     private func previewStack(_ faces: [FontFace]) -> some View {
-        let shown = Array(faces.prefix(previewLimit))
-        let comparing = overlayOpen || alignOpen
+        let shown = store.workspaceTab == .preview ? faces : Array(faces.prefix(previewLimit))
         return VStack(alignment: .leading, spacing: 0) {
             Group {
                 if overlayOpen && shown.count > 1 {
@@ -594,43 +1052,52 @@ struct SpecimenView: View {
                 } else if alignOpen && shown.count > 1 {
                     alignBoard(shown)
                         .padding(12)
-                } else {
-                    VStack(spacing: 0) {
-                        ForEach(Array(shown.enumerated()), id: \.element.id) { index, face in
-                            if index > 0 {
-                                Rectangle()
-                                    .fill(ink.opacity(0.14))
-                                    .frame(height: 1)
+                } else if store.workspaceTab == .preview {
+                    let groups = clusters(shown)
+                    let headings = store.previewHeadings
+                    let links = store.previewListLinks
+                    LazyVStack(alignment: .leading, spacing: 8) {
+                        ForEach(Array(groups.enumerated()), id: \.element.id) { index, cluster in
+                            // The name of the sort group: a category, a foundry, a format.
+                            if let heading = cluster.faces.first.flatMap({ headings[$0.id] }) {
+                                stackHeading(heading)
+                                    .padding(.top, index == 0 ? 0 : 8)
                             }
-                            previewSlice(face, placeholder: index == 0, index: index, count: faces.count)
+                            clusterCard(cluster, alone: opensFamilies(groups), first: index == 0, count: faces.count)
+                                .id(cluster.id)
+                        }
+                        if !links.isEmpty || store.isViewingList {
+                            listLinkStack(links)
+                                .padding(.top, 8)
+                                .id("list-links")
                         }
                     }
+                    .padding(.leading, 16)
+                    .padding(.trailing, 9)
+                    // The room above the first card belongs to the list, so cards scroll away right under the line.
+                    .padding(.top, 12)
+                } else {
+                    VStack(spacing: 8) {
+                        ForEach(Array(shown.enumerated()), id: \.element.id) { index, face in
+                            sliceCard {
+                                previewSlice(face, placeholder: index == 0, count: faces.count)
+                            }
+                        }
+                    }
+                    .padding(.leading, 16)
+                    .padding(.trailing, 9)
+                    .padding(.top, 4)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .topLeading)
-            if comparing {
-                // Comparing wants company: a second font to set beside or over the first.
-                HStack(spacing: 10) {
-                    if shown.count < 2 {
-                        Text("\(mode.title) needs a second font. Select another one in the library, drop it here, or add it.")
-                            .font(.caption)
-                            .foregroundStyle(ink.opacity(0.72))
-                    }
-                    AddFontButton(title: shown.count < 2 ? "Add font…" : "Add another font…")
-                        .tint(ink)
-                    Spacer(minLength: 0)
-                }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 10)
-            }
-            if faces.count > shown.count {
-                Text("Showing \(shown.count) of \(faces.count) selected fonts.")
-                    .font(.caption)
+            if store.workspaceTab != .preview, faces.count > shown.count {
+                Text("Showing \(shown.count) of \(faces.count) pinned fonts.")
+                    .font(.uiCaption)
                     .foregroundStyle(ink.opacity(0.72))
                     .padding(.horizontal, 16)
                     .padding(.vertical, 8)
             }
-            if !store.outsideSelection.isEmpty {
+            if !looseOutside.isEmpty {
                 outsideStack
                     .padding(16)
             }
@@ -640,6 +1107,100 @@ struct SpecimenView: View {
         }
     }
 
+    private func stackHeading(_ title: String) -> some View {
+        Text(title)
+            .font(AppChrome.type(11, weight: .medium))
+            .foregroundStyle(tone.half)
+            .padding(.leading, 2)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// Outside fonts on show that are not saved in the open list; those have their own cards under the list's fonts.
+    private var looseOutside: [OutsideFont] {
+        let saved = Set(store.previewListLinks.map(\.nameKey))
+        return store.outsideSelection.filter { !saved.contains($0.nameKey) }
+    }
+
+    /// The fonts of this list that are not in the library, under those that are: saved from the news, or added
+    /// by hand with the plus as a name and a link.
+    private func listLinkStack(_ links: [OutsideFont]) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                stackHeading(links.isEmpty ? "Not in library" : "Not in library · \(links.count)")
+                if case .group(let list) = store.filter {
+                    IconChip(symbol: "plus", help: "Add a font that is not in the library: its name and the link to its page") {
+                        addingLink = true
+                    }
+                    .popover(isPresented: $addingLink, arrowEdge: .bottom) {
+                        OutsideFontForm { name, source, url in
+                            store.addListLink(list, name: name, source: source, url: url)
+                        }
+                    }
+                }
+            }
+            if links.isEmpty {
+                Text("Fonts you do not have yet: add a name and a link with the plus, or drag a name from News onto the list in the navigation.")
+                    .font(AppChrome.small)
+                    .foregroundStyle(tone.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.leading, 2)
+            }
+            ForEach(links) { item in
+                listLinkCard(item)
+                    .id("link-\(item.nameKey)")
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func listLinkCard(_ item: OutsideFont) -> some View {
+        // Looking up the foundry page gives the shown item its real address, so the two are matched by name.
+        let open = store.outsideSelection.first { $0.nameKey == item.nameKey }
+        return sliceCard {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    Text(item.name)
+                        .font(AppChrome.type(12, weight: .medium))
+                        .foregroundStyle(tone.ink)
+                        .lineLimit(1)
+                    Text(item.source)
+                        .font(AppChrome.type(11))
+                        .foregroundStyle(tone.half)
+                        .lineLimit(1)
+                    Text("Link")
+                        .font(AppChrome.type(9, weight: .medium))
+                        .foregroundStyle(tone.half)
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 1)
+                        .overlay(RoundedRectangle(cornerRadius: 3, style: .continuous).stroke(tone.stroke, lineWidth: 0.5))
+                    Spacer(minLength: 8)
+                    Button(open == nil ? "Show page" : "Hide page") {
+                        store.outsideSelection = open == nil ? [item] : []
+                    }
+                    .buttonStyle(.chip(on: open != nil))
+                    .help("Show the foundry's page for \(item.name) here")
+                    Button("Open") { NSWorkspace.shared.open(item.url) }
+                        .buttonStyle(.chip())
+                        .help("Open the page in your browser")
+                    Button("Edit…") { editingOutside = item }
+                        .buttonStyle(.chip())
+                        .help("Change the name, source, or link")
+                    if case .group(let list) = store.filter {
+                        IconChip(symbol: "xmark", help: "Remove \(item.name) from this list") {
+                            store.removeListLink(list, item: item)
+                        }
+                    }
+                }
+                if let open {
+                    outsidePreview(open, embedPage: true, header: false)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
+        }
+    }
+
+
     private func outsideFocus(_ item: OutsideFont) -> some View {
         let page = previewPage(for: item)
         let ready = page.path.count > 1 || store.resolvedFontPages.contains(store.fontPageKey(item))
@@ -647,11 +1208,11 @@ struct SpecimenView: View {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(item.name)
-                        .font(.title3.weight(.semibold))
+                        .font(.uiTitle3.weight(.semibold))
                         .foregroundStyle(ink)
                         .lineLimit(2)
                     Text(item.source)
-                        .font(.caption)
+                        .font(.uiCaption)
                         .foregroundStyle(ink.opacity(0.72))
                         .lineLimit(1)
                 }
@@ -660,17 +1221,15 @@ struct SpecimenView: View {
                 paperButton("Open", help: "Open the page in your browser") { NSWorkspace.shared.open(ready ? page : item.url) }
             }
             if ready {
-                FoundryPageView(url: page)
+                LinkedPage(item: item, page: page)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .frame(minHeight: 520)
                     .layoutPriority(1)
-                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(ink.opacity(0.2)))
             } else {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
                     Text("Opening the font page…")
-                        .font(.caption)
+                        .font(.uiCaption)
                         .foregroundStyle(ink.opacity(0.72))
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -680,7 +1239,7 @@ struct SpecimenView: View {
                 }
             }
             Text("The foundry's own page. The font file is not downloaded.")
-                .font(.caption)
+                .font(.uiCaption)
                 .foregroundStyle(ink.opacity(0.72))
         }
         .padding(16)
@@ -691,31 +1250,32 @@ struct SpecimenView: View {
     private var outsideStack: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Outside the library")
-                .font(.caption.weight(.semibold))
+                .font(.uiCaption.weight(.semibold))
                 .foregroundStyle(ink.opacity(0.72))
-            ForEach(store.outsideSelection) { item in
-                outsidePreview(item, embedPage: store.outsideSelection.count == 1)
+            ForEach(looseOutside) { item in
+                outsidePreview(item, embedPage: looseOutside.count == 1)
             }
-            if store.outsideSelection.count > 1 {
+            if looseOutside.count > 1 {
                 Text("Select one font to show its page here.")
-                    .font(.caption)
+                    .font(.uiCaption)
                     .foregroundStyle(ink.opacity(0.72))
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private func outsidePreview(_ item: OutsideFont, embedPage: Bool) -> some View {
+    private func outsidePreview(_ item: OutsideFont, embedPage: Bool, header: Bool = true) -> some View {
         let match = store.face(forFamily: item.name)
         return VStack(alignment: .leading, spacing: 8) {
+            if header {
             HStack(spacing: 8) {
                 Text(match == nil ? "Name only" : "In library")
-                    .font(.caption2.weight(.semibold))
+                    .font(.uiCaption2.weight(.semibold))
                     .padding(.horizontal, 6)
                     .padding(.vertical, 2)
                     .background(ink.opacity(0.12), in: Capsule())
                 Text(item.source)
-                    .font(.caption)
+                    .font(.uiCaption)
                     .foregroundStyle(ink.opacity(0.72))
                 Spacer()
                 paperButton("Edit…", help: "Change the name, source, or link") { editingOutside = item }
@@ -725,24 +1285,21 @@ struct SpecimenView: View {
                 .font(.system(size: match == nil ? 28 : 22, weight: .medium))
                 .foregroundStyle(ink)
                 .lineLimit(2)
-            SpecimenPicture(item: item)
+            }
             if embedPage {
                 let page = previewPage(for: item)
                 let ready = page.path.count > 1 || store.resolvedFontPages.contains(store.fontPageKey(item))
                 VStack(alignment: .leading, spacing: 6) {
                     Text(ready && page.path.count > 1 ? "Font page" : "Foundry page")
-                        .font(.caption.weight(.semibold))
+                        .font(.uiCaption.weight(.semibold))
                         .foregroundStyle(ink.opacity(0.72))
                     if ready {
-                        FoundryPageView(url: page)
-                            .frame(height: 420)
-                            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(ink.opacity(0.2)))
+                        LinkedPage(item: item, page: page, height: 420)
                     } else {
                         HStack(spacing: 8) {
                             ProgressView().controlSize(.small)
                             Text("Opening the font page…")
-                                .font(.caption)
+                                .font(.uiCaption)
                                 .foregroundStyle(ink.opacity(0.72))
                         }
                         .frame(maxWidth: .infinity, minHeight: 120, alignment: .leading)
@@ -751,7 +1308,7 @@ struct SpecimenView: View {
                         }
                     }
                     Text("The foundry's own page for this font. The font file is not downloaded.")
-                        .font(.caption)
+                        .font(.uiCaption)
                         .foregroundStyle(ink.opacity(0.72))
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -759,13 +1316,13 @@ struct SpecimenView: View {
             if let match {
                 FamilySample(face: match, text: specimenText, size: min(specimenSize, 48))
                 Text("A font with this name is already in the library, so the sample uses that file.")
-                    .font(.caption)
+                    .font(.uiCaption)
                     .foregroundStyle(ink.opacity(0.72))
             }
         }
-        .padding(14)
+        .padding(header ? 14 : 0)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(ink.opacity(0.06), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .background(ink.opacity(header ? 0.06 : 0), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
     private func previewPage(for item: OutsideFont) -> URL {
@@ -775,89 +1332,192 @@ struct SpecimenView: View {
         return store.foundrySite(for: item) ?? item.url
     }
 
-    /// Which project the shown cuts are licensed for. One field writes to every cut on screen, or to the whole family.
+    /// The projects the shown cuts are licensed for: one row each with its end date, and a field for another.
+    /// What is entered goes to every cut on screen, or to the whole family.
     private func licenseSection(_ faces: [FontFace]) -> some View {
         let targets = licenseTargets(faces)
-        let projects = Set(faces.map { store.license(for: $0) })
-        let shared = projects.count == 1 ? projects.first ?? "" : ""
-        let mixed = projects.count > 1
+        let entries = licenseEntries(faces)
+        let recent = store.licenseProjects.filter { project in !entries.contains { $0.project == project } }
         let familyCount = faces.map { store.familyFaceCount($0) }.reduce(0, +)
-        return DisclosureGroup(isExpanded: $licenseOpen) {
+        let note = store.licenseNote(for: faces)
+        return InfoGroup(isExpanded: $licenseOpen) {
             VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 6) {
-                    TextField(
-                        mixed ? "Different projects – type to set one for all" : "Project or client, e.g. Acme rebrand",
-                        text: Binding(
-                            get: { shared },
-                            set: { store.setLicense($0, for: targets) }
-                        )
-                    )
-                    .textFieldStyle(.roundedBorder)
-                    if !store.licenseProjects.isEmpty {
+                ForEach(entries) { entry in
+                    licenseRow(entry, targets: targets)
+                }
+                HStack(spacing: 5) {
+                    TextField(entries.isEmpty ? "Project or client" : "Another project", text: $licenseDraft)
+                        .textFieldStyle(.plain)
+                        .foregroundStyle(tone.ink)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
+                        .background(tone.control, in: RoundedRectangle(cornerRadius: 4, style: .continuous))
+                        .onSubmit { addLicenseDraft(targets) }
+                        .help("The project or client this font is licensed for. A font used in several projects takes one entry for each.")
+                    if !recent.isEmpty {
                         Menu {
-                            ForEach(store.licenseProjects, id: \.self) { project in
-                                Button(project) { store.setLicense(project, for: targets) }
+                            ForEach(recent, id: \.self) { project in
+                                Button(project) { store.addLicense(project, for: targets) }
                             }
                         } label: {
-                            Image(systemName: "clock.arrow.circlepath")
+                            Text("Recent")
                         }
-                        .menuStyle(.borderlessButton)
-                        .fixedSize()
-                        .help("Use a project you already entered")
+                        .chromeMenuChip(compact: true)
+                        .help("Add a project you already entered for another font")
                     }
-                    if !shared.isEmpty || mixed {
-                        Button {
-                            store.setLicense("", for: targets)
-                        } label: {
-                            Image(systemName: "xmark.circle")
-                        }
-                        .buttonStyle(.borderless)
-                        .help("Remove the license note")
-                    }
-                }
-                if mixed {
-                    ForEach(faces) { face in
-                        HStack(spacing: 6) {
-                            Text("\(face.family) · \(face.style)")
-                                .lineLimit(1)
-                            Spacer(minLength: 4)
-                            Text(store.license(for: face).isEmpty ? "–" : store.license(for: face))
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                        }
-                        .font(.caption)
-                    }
+                    Button("Add") { addLicenseDraft(targets) }
+                        .buttonStyle(.chip())
+                        .disabled(licenseDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .help(entries.isEmpty ? "Note this project as the font's license" : "Add this project beside the others")
                 }
                 if familyCount > faces.count {
                     Toggle("Apply to the whole family (\(familyCount) styles)", isOn: $licenseWholeFamily)
-                        .font(.callout)
-                        .help("Set the license for every style of the family at once")
+                        .toggleStyle(.checkbox)
+                        .help("Add, remove, and date a license for every style of the family at once")
                 }
-                Text("Licensed cuts appear under Licensed in the sidebar and with the Only licensed filter.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                Text(entries.isEmpty
+                    ? "Licensed fonts carry a tag beside their name and stand under Licensed in the navigation."
+                    : "A license with an end date shows it beside the font’s name; once the day has passed, the tag turns red.")
+                    .font(.uiCaption)
+                    .foregroundStyle(tone.muted)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            .padding(.top, 8)
+            .padding(.top, 2)
         } label: {
             HStack(spacing: 6) {
                 Text("License")
-                if !shared.isEmpty {
-                    Text(shared)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                if let first = entries.first {
+                    Text(entries.count > 1 ? "\(first.project) +\(entries.count - 1)" : first.project)
+                        .font(.uiCaption)
+                        .foregroundStyle(tone.half)
                         .lineLimit(1)
-                } else if mixed {
-                    Text("mixed")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .layoutPriority(-1)
+                }
+                if let note, note.expired {
+                    Label(note.short, systemImage: "exclamationmark.triangle.fill")
+                        .labelStyle(.titleAndIcon)
+                        .font(.uiCaption)
+                        .foregroundStyle(LicenseTag.alarm)
+                        .lineLimit(1)
+                        .help(note.help)
+                } else if let note, !note.short.isEmpty {
+                    Text(note.short)
+                        .font(.uiCaption)
+                        .foregroundStyle(tone.half)
+                        .lineLimit(1)
+                        .help(note.help)
                 }
             }
         }
-        .font(.headline)
     }
 
-    /// The cuts a license entry applies to: the ones on screen, or every cut of their families.
+    /// One project across the cuts on show, with the end date they share.
+    private struct LicenseEntry: Identifiable {
+        var project: String
+        /// The end date, when every cut with this license has the same.
+        var until: Date?
+        /// The cuts carry different end dates for this project.
+        var differs: Bool
+        /// Of the cuts on show, how many carry it.
+        var carriers: Int
+        var id: String { project }
+
+        var expired: Bool { FontLicense(project: project, until: until).expired }
+    }
+
+    private func licenseEntries(_ faces: [FontFace]) -> [LicenseEntry] {
+        var order: [String] = []
+        var ends: [String: Set<Date?>] = [:]
+        var carriers: [String: Int] = [:]
+        for face in faces {
+            for license in store.licenses(for: face) {
+                if ends[license.project] == nil { order.append(license.project) }
+                ends[license.project, default: []].insert(license.until)
+                carriers[license.project, default: 0] += 1
+            }
+        }
+        return order.map { project in
+            let dates = ends[project] ?? []
+            return LicenseEntry(
+                project: project,
+                until: dates.count == 1 ? (dates.first ?? nil) : nil,
+                differs: dates.count > 1,
+                carriers: carriers[project] ?? 0
+            )
+        }
+    }
+
+    private func addLicenseDraft(_ targets: [FontFace]) {
+        let project = licenseDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !project.isEmpty else { return }
+        store.addLicense(project, for: targets)
+        licenseDraft = ""
+    }
+
+    /// One license: the project, and under it the day it runs until. A day that has passed stands in red.
+    private func licenseRow(_ entry: LicenseEntry, targets: [FontFace]) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 5) {
+                if entry.expired {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.uiCaption)
+                        .foregroundStyle(LicenseTag.alarm)
+                }
+                Text(entry.project)
+                    .font(AppChrome.type(12, weight: .medium))
+                    .foregroundStyle(tone.ink)
+                    .lineLimit(2)
+                    .textSelection(.enabled)
+                Spacer(minLength: 4)
+                IconChip(symbol: "xmark", quiet: true, help: "Remove the license for \(entry.project)") {
+                    store.removeLicense(entry.project, for: targets)
+                }
+            }
+            HStack(spacing: 5) {
+                if let until = entry.until {
+                    Text(entry.expired ? "Expired" : "Valid until")
+                        .font(entry.expired ? .uiCaption.weight(.semibold) : .uiCaption)
+                        .foregroundStyle(entry.expired ? LicenseTag.alarm : tone.half)
+                    DatePicker(
+                        "Valid until",
+                        selection: Binding(
+                            get: { until },
+                            set: { store.setLicenseEnd($0, project: entry.project, for: targets) }
+                        ),
+                        displayedComponents: .date
+                    )
+                    .datePickerStyle(.field)
+                    .labelsHidden()
+                    .controlSize(.small)
+                    .fixedSize()
+                    .help("The last day the license for \(entry.project) is valid")
+                    Spacer(minLength: 4)
+                    IconChip(symbol: "arrow.counterclockwise", quiet: true, help: "Take the end date away: this license has no end") {
+                        store.setLicenseEnd(nil, project: entry.project, for: targets)
+                    }
+                } else {
+                    Text(entry.differs ? "Different end dates" : "No end date")
+                        .font(.uiCaption)
+                        .foregroundStyle(tone.half)
+                    Spacer(minLength: 4)
+                    Button("Set date") {
+                        let start = Calendar.current.startOfDay(for: Date())
+                        store.setLicenseEnd(Calendar.current.date(byAdding: .year, value: 1, to: start) ?? start, project: entry.project, for: targets)
+                    }
+                    .buttonStyle(.chip())
+                    .help("Enter the day this license ends. It starts a year from today; change it to the real date.")
+                }
+            }
+        }
+        .padding(.horizontal, 7)
+        .padding(.vertical, 5)
+        .background(tone.card, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                .stroke(entry.expired ? LicenseTag.alarm.opacity(0.7) : tone.hairline, lineWidth: 0.5)
+        )
+    }
+
     private func licenseTargets(_ faces: [FontFace]) -> [FontFace] {
         guard licenseWholeFamily else { return faces }
         let families = Set(faces.map(\.family))
@@ -865,22 +1525,21 @@ struct SpecimenView: View {
     }
 
     private func notesSection(_ faces: [FontFace]) -> some View {
-        DisclosureGroup("Notes", isExpanded: $notesOpen) {
+        InfoGroup("Notes", isExpanded: $notesOpen) {
             VStack(alignment: .leading, spacing: 10) {
                 ForEach(faces) { face in
                     noteField(face, showName: faces.count > 1)
                 }
             }
-            .padding(.top, 8)
+            .padding(.top, 2)
         }
-        .font(.headline)
     }
 
     private func noteField(_ face: FontFace, showName: Bool) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             if showName {
                 Text("\(face.family) · \(face.style)")
-                    .font(.caption)
+                    .font(.uiCaption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
@@ -895,24 +1554,27 @@ struct SpecimenView: View {
         Button {
             colorsOpen.toggle()
         } label: {
-            ZStack {
-                Circle()
-                    .fill(Color(nsColor: paper))
-                Circle()
-                    .trim(from: 0, to: 0.5)
-                    .fill(ink)
-                    .rotationEffect(.degrees(45))
-                Circle()
-                    .stroke(Color.primary.opacity(0.35), lineWidth: 1)
+            HStack(spacing: 5) {
+                ZStack {
+                    Circle()
+                        .fill(Color(nsColor: paper))
+                    Circle()
+                        .trim(from: 0, to: 0.5)
+                        .fill(ink)
+                        .rotationEffect(.degrees(45))
+                    Circle()
+                        .stroke(Color.primary.opacity(0.35), lineWidth: 0.5)
+                }
+                .frame(width: 9, height: 9)
+                Text("Colors")
             }
-            .frame(width: 14, height: 14)
         }
-        .buttonStyle(.borderless)
+        .buttonStyle(.chip(on: colorsOpen))
         .help("Paper and text colours")
         .popover(isPresented: $colorsOpen, arrowEdge: .bottom) {
             VStack(alignment: .leading, spacing: 10) {
                 Text("Colors")
-                    .font(.caption.weight(.semibold))
+                    .font(.uiCaption.weight(.semibold))
                     .foregroundStyle(.secondary)
                 colorSwatches
                 HStack(spacing: 10) {
@@ -926,47 +1588,6 @@ struct SpecimenView: View {
             .padding(12)
             .frame(width: 300)
         }
-    }
-
-    private var previewSizeButton: some View {
-        Button {
-            store.previewExpanded.toggle()
-        } label: {
-            if store.previewExpanded {
-                Label("Show library", systemImage: "arrow.down.right.and.arrow.up.left")
-            } else {
-                Image(systemName: "arrow.up.left.and.arrow.down.right")
-            }
-        }
-        .buttonStyle(.borderless)
-        .help(store.previewExpanded ? "Show the library beside the preview" : "Enlarge the preview")
-    }
-
-    private func modeSwitch(_ faces: [FontFace], labels: Bool) -> some View {
-        HStack(spacing: 2) {
-            ForEach(PreviewMode.allCases) { candidate in
-                let active = mode == candidate
-                Button {
-                    select(candidate, faces: faces)
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: active && candidate != .preview ? candidate.symbol + ".fill" : candidate.symbol)
-                        if labels {
-                            Text(candidate.title)
-                        }
-                    }
-                    .font(.caption.weight(active ? .semibold : .regular))
-                    .padding(.horizontal, labels ? 8 : 6)
-                    .padding(.vertical, 4)
-                    .background(active ? Color.primary.opacity(0.12) : Color.clear, in: RoundedRectangle(cornerRadius: 6))
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .help(candidate.help)
-            }
-        }
-        .padding(2)
-        .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 8))
     }
 
     private func arranged(_ faces: [FontFace]) -> [FontFace] {
@@ -1001,52 +1622,86 @@ struct SpecimenView: View {
         previewOrder = order
     }
 
-    private func previewSlice(_ face: FontFace, placeholder: Bool, index: Int, count: Int) -> some View {
+    /// One cut in the stacked preview: a header with its name and buttons, then the editable sample.
+    /// A selected cut sits on grey, and its Info shows under the navigation.
+    private func previewSlice(
+        _ face: FontFace,
+        placeholder: Bool,
+        count: Int,
+        cluster: FamilyCluster? = nil,
+        open: Bool = true,
+        leads: Bool = true
+    ) -> some View {
         let height = editorHeights[face.id] ?? 120
+        let family = cluster?.faces ?? [face]
+        let folded = family.count > 1 && !open
+        let selected = store.selection.contains(face.id)
+        let ground = selected ? selectedPaper : paper
         // A variable slice stands for a whole file, so its menu switches between that file's named instances.
-        let cuts = face.isVariable ? store.instances(of: face) : store.cuts(in: face.family)
-        let familyShown = !face.isVariable && store.previewFaces.filter { $0.family == face.family }.count > 1
+        let instances = face.isVariable && !folded ? store.instances(of: face) : []
         return VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 6) {
-                Image(systemName: "line.3.horizontal")
-                    .font(.caption2)
-                    .foregroundStyle(ink.opacity(0.55))
-                    .help(count > 1 ? "Drag to change the order, or into the chat or a list" : "Drag this font into the chat or a list")
+                if let cluster, family.count > 1 {
+                    if leads {
+                        Button {
+                            toggledFamilies.formSymmetricDifference([cluster.id])
+                        } label: {
+                            ChromeChevron(open: open, color: ink)
+                        }
+                        .buttonStyle(.plain)
+                        .help(open ? "Fold \(face.family) to one sample" : "Show all \(family.count) styles of \(face.family)")
+                    } else {
+                        Color.clear.frame(width: 10, height: 12)
+                    }
+                }
                 Text(face.family)
-                    .font(.caption2)
-                    .foregroundStyle(ink.opacity(0.82))
+                    .font(AppChrome.type(AppChrome.smallSize + 1, weight: .medium))
+                    .foregroundStyle(ink)
                     .lineLimit(1)
-                if familyShown {
-                    // Several cuts of this family are already on screen, so each slice simply names its style.
-                    Text(face.style)
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(ink.opacity(0.82))
-                        .lineLimit(1)
+                    .help(count > 1 ? "Drag to change the order, or into the chat or a list" : "Drag this font into the chat or a list")
+                if instances.count > 1 {
+                    cutMenu(face, cuts: instances)
                 } else {
-                    cutMenu(face, cuts: cuts)
+                    Text(folded ? foldedLabel(face, styles: family.count) : "\(face.style), \(face.format.uppercased())")
+                        .font(AppChrome.small)
+                        .foregroundStyle(ink.opacity(0.5))
+                        .lineLimit(1)
                 }
-                if store.isLicensed(face) {
-                    LicenseMark(project: store.license(for: face), tint: ink.opacity(0.7))
-                }
-                if face.isVariable {
+                if face.isVariable, !face.axes.isEmpty {
+                    VariableAxesButton(face: face)
+                } else if face.isVariable {
                     Text("VAR")
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(ink.opacity(0.82))
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 2)
-                        .background(ink.opacity(0.1), in: Capsule())
-                        .help("Variable font. Alone in the preview, its axes appear under Adjust.")
+                        .font(AppChrome.type(9, weight: .medium))
+                        .foregroundStyle(ink.opacity(0.7))
+                        .help("Variable font")
                 }
-                activationButton(face)
-                Spacer(minLength: 0)
-                playgroundButton(face)
-                pinButton(face)
+                if let note = store.licenseNote(for: folded ? family : [face]) {
+                    LicenseTag(note: note) {
+                        // The tag leads to the license itself.
+                        store.selectInPreview(face, scroll: false)
+                        licenseOpen = true
+                    }
+                }
+                Spacer(minLength: 8)
+                Button("Info") {
+                    store.selectInPreview(face, scroll: false)
+                }
+                .buttonStyle(.chip(on: selected))
+                .help(selected ? "Selected: its Info shows under the navigation" : "Select this cut and show its Info under the navigation")
+                if folded {
+                    activateAllButton(family)
+                    pinAllButton(family)
+                } else {
+                    activationButton(face)
+                    playgroundButton(face)
+                    pinButton(face)
+                }
             }
-            .font(.caption2)
-            .foregroundStyle(ink.opacity(0.82))
-            .padding(.horizontal, 16)
-            .padding(.top, 10)
+            .padding(.horizontal, 10)
+            .padding(.top, 7)
+            .padding(.bottom, 2)
             .contentShape(Rectangle())
+            .onTapGesture { store.selectInPreview(face, scroll: false) }
             .draggable(FontDragItem(identities: [face.identity]))
             .dropDestination(for: FontDragItem.self) { items, _ in
                 let identities = items.flatMap(\.identities)
@@ -1064,77 +1719,90 @@ struct SpecimenView: View {
                     pointSize: specimenSize,
                     tracking: tracking * specimenSize,
                     leading: leading,
-                    textColor: nsColor(hex: foregroundHex, fallback: .black),
-                    background: paper,
-                    variations: facesUseAxes ? variations : [:],
+                    textColor: inkNS,
+                    background: ground,
+                    variations: store.axisValues[face.id] ?? [:],
                     features: featureSettings(face),
-                    measuredHeight: heightBinding(face.id)
+                    measuredHeight: heightBinding(face.id),
+                    onFocus: { store.selectInPreview(face, scroll: false) }
                 )
                 .frame(maxWidth: .infinity, minHeight: max(height, specimenSize * max(leading, 1.2) + 48), alignment: .topLeading)
                 if placeholder && specimenText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     Text("Type here")
                         .foregroundStyle(ink.opacity(0.4))
-                        .padding(.horizontal, 18)
-                        .padding(.vertical, 12)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
                         .allowsHitTesting(false)
                 }
             }
+            .padding(.horizontal, 6)
+            .padding(.bottom, 6)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(nsColor: ground))
+    }
+
+    private func foldedLabel(_ face: FontFace, styles: Int) -> String {
+        let category = face.category == .unclassified ? "" : "\(face.category.rawValue), "
+        return "\(category)\(styles) Styles"
     }
 
     /// Sends this font to the Playground as a new block, set in the current sample text.
     private func playgroundButton(_ face: FontFace) -> some View {
-        Button {
+        IconChip(symbol: "plus.rectangle.on.rectangle", help: "To Playground: add this font as a new text block") {
             store.addToPlayground([face.identity])
-        } label: {
-            Image(systemName: "plus.rectangle.on.rectangle")
-                .font(.caption2.weight(.medium))
-                .foregroundStyle(ink.opacity(0.6))
-                .frame(width: 18, height: 18)
-                .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
-        .help("Add this font to the Playground")
     }
 
-    /// Keeps a font in the preview while the selection moves on, so other fonts can be browsed against it.
+    /// Pins a font for Compare, Shape, and Playground.
     private func pinButton(_ face: FontFace) -> some View {
         let pinned = store.isPinned(face)
-        return Button {
+        return IconChip(
+            symbol: pinned ? "pin.fill" : "pin",
+            on: pinned,
+            help: pinned ? "Pinned for Compare, Shape, and Playground. Click to unpin." : "Pin this font for Compare, Shape, and Playground"
+        ) {
             store.togglePin(face)
-        } label: {
-            Image(systemName: pinned ? "pin.fill" : "pin")
-                .font(.caption2.weight(.medium))
-                .foregroundStyle(pinned ? ink : ink.opacity(0.6))
-                .frame(width: 18, height: 18)
-                .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
-        .help(pinned ? "Pinned: stays in the preview whatever you select. Click to unpin." : "Pin this font so it stays in the preview while you look at others")
     }
 
+    private func pinAllButton(_ faces: [FontFace]) -> some View {
+        let pinned = faces.allSatisfy { store.isPinned($0) }
+        return IconChip(
+            symbol: pinned ? "pin.fill" : "pin",
+            on: pinned,
+            help: pinned ? "Every style of this family is pinned. Click to unpin them." : "Pin all \(faces.count) styles for Compare, Shape, and Playground"
+        ) {
+            if pinned {
+                let identities = Set(faces.map(\.identity))
+                store.pinnedIdentities.removeAll { identities.contains($0) }
+            } else {
+                for face in faces where !store.isPinned(face) {
+                    store.togglePin(face)
+                }
+            }
+        }
+    }
+
+    private func activateAllButton(_ faces: [FontFace]) -> some View {
+        let active = faces.allSatisfy { $0.activation.isAvailableToApps }
+        return Button(active ? "All active" : "Activate all") {
+            if active {
+                store.deactivate(paths: Array(Set(faces.filter(\.canDeactivate).map(\.filePath))))
+            } else {
+                store.activate(paths: Array(Set(faces.filter(\.canActivate).map(\.filePath))))
+            }
+        }
+        .buttonStyle(.chip(on: active))
+        .disabled(!faces.contains { active ? $0.canDeactivate : $0.canActivate })
+        .help(active ? "Every style is available to other apps. Click to deactivate them." : "Activate all \(faces.count) styles so other apps can use them")
+    }
+
+
+    /// The pinned fonts over each other, each in its colour. The one clicked among the pinned fonts lies on top
+    /// and is the one a drag moves.
     private func overlayBoard(_ faces: [FontFace]) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                referenceMenu(faces)
-                paperButton("X-height", help: "Shift the fonts so their x-heights meet the reference") { snapAlign(faces, metric: CTFontGetXHeight) }
-                paperButton("Cap height", help: "Shift the fonts so their cap heights meet the reference") { snapAlign(faces, metric: CTFontGetCapHeight) }
-                paperReset("Reset alignment") { alignShifts = [:] }
-                Spacer(minLength: 0)
-                playgroundMenu(faces)
-            }
-            .padding(.horizontal, 12)
-            .padding(.top, 10)
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 6) {
-                    ForEach(Array(faces.enumerated()), id: \.element.id) { index, face in
-                        overlayChip(face, index: index)
-                    }
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 2)
-            }
             AlignCanvas(
                 faces: faces,
                 text: specimenText,
@@ -1147,9 +1815,10 @@ struct SpecimenView: View {
                 referenceID: referenceFace(faces)?.id,
                 stacked: true,
                 colors: overlayNSColors(faces),
-                focusedID: overlayFocus,
+                focusedID: referenceFace(faces)?.id,
                 onShift: { id, shift in
                     alignShifts[id] = shift
+                    alignSnap = nil
                 },
                 onHeight: { alignCanvasHeight = $0 }
             )
@@ -1160,19 +1829,6 @@ struct SpecimenView: View {
 
     private func alignBoard(_ faces: [FontFace]) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                referenceMenu(faces)
-                paperButton("X-height", help: "Shift the fonts so their x-heights meet the reference") { snapAlign(faces, metric: CTFontGetXHeight) }
-                paperButton("Cap height", help: "Shift the fonts so their cap heights meet the reference") { snapAlign(faces, metric: CTFontGetCapHeight) }
-                paperReset("Reset alignment") { alignShifts = [:] }
-                Text("Drag a font up or down.")
-                    .font(.caption)
-                    .foregroundStyle(ink.opacity(0.82))
-                Spacer(minLength: 0)
-                playgroundMenu(faces)
-            }
-            .padding(.horizontal, 12)
-            .padding(.top, 10)
             AlignCanvas(
                 faces: faces,
                 text: specimenText,
@@ -1185,6 +1841,7 @@ struct SpecimenView: View {
                 referenceID: referenceFace(faces)?.id,
                 onShift: { id, shift in
                     alignShifts[id] = shift
+                    alignSnap = nil
                 },
                 onHeight: { alignCanvasHeight = $0 }
             )
@@ -1210,85 +1867,45 @@ struct SpecimenView: View {
         faces.enumerated().map { index, face in overlayNSColor(face, index: index) }
     }
 
-    /// One chip per font in Overlay: a colour dot that opens the palette, and the name, which focuses the font.
-    private func overlayChip(_ face: FontFace, index: Int) -> some View {
-        let focused = overlayFocus == face.id
+    /// The colour of a font in Overlay, as a dot on its pinned card. A click opens the palette.
+    private func overlaySwatch(_ face: FontFace, index: Int) -> some View {
         let color = overlayNSColor(face, index: index).withAlphaComponent(1)
-        return HStack(spacing: 7) {
-            Button {
-                overlayColorFor = overlayColorFor == face.id ? nil : face.id
-            } label: {
-                Circle()
-                    .fill(Color(nsColor: color))
-                    .overlay(Circle().stroke(ink.opacity(0.5), lineWidth: 1))
-                    .frame(width: 14, height: 14)
-                    .contentShape(Circle())
-            }
-            .buttonStyle(.plain)
-            .help("Colour of this font")
-            .popover(isPresented: Binding(get: { overlayColorFor == face.id }, set: { if !$0 { overlayColorFor = nil } }), arrowEdge: .bottom) {
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack(spacing: 8) {
-                        ForEach(overlayPalette, id: \.name) { entry in
-                            Button {
-                                overlayColorHex[face.id] = hexString(Color(nsColor: entry.color.withAlphaComponent(1)))
-                                overlayColorFor = nil
-                            } label: {
-                                Circle()
-                                    .fill(Color(nsColor: entry.color.withAlphaComponent(1)))
-                                    .overlay(Circle().stroke(Color.primary.opacity(0.35), lineWidth: 1))
-                                    .frame(width: 20, height: 20)
-                            }
-                            .buttonStyle(.plain)
-                            .help(entry.name)
-                        }
-                    }
-                    ColorPicker("Custom", selection: overlayColor(face, index: index), supportsOpacity: false)
-                        .font(.caption)
-                }
-                .padding(12)
-            }
-            Button {
-                overlayFocus = focused ? nil : face.id
-            } label: {
-                Text("\(face.family) \(face.style)")
-                    .lineLimit(1)
-            }
-            .buttonStyle(.plain)
-            .help("Click to bring this font to the front and drag it up or down. Drag the chip into the chat or a list.")
-            .draggable(FontDragItem(identities: [face.identity]))
-        }
-        .font(.caption.weight(focused ? .semibold : .regular))
-        .foregroundStyle(ink)
-        .padding(.leading, 7)
-        .padding(.trailing, 10)
-        .padding(.vertical, 4)
-        .background(ink.opacity(focused ? 0.16 : 0.08), in: Capsule())
-        .overlay(Capsule().stroke(ink.opacity(focused ? 0.6 : 0.3), lineWidth: 1))
-    }
-
-    /// In Align and Overlay there is no slice header, so the fonts go to the Playground from here.
-    private func playgroundMenu(_ faces: [FontFace]) -> some View {
-        Menu {
-            ForEach(faces) { face in
-                Button("\(face.family) \(face.style)") { store.addToPlayground([face.identity]) }
-            }
-            if faces.count > 1 {
-                Divider()
-                Button("All \(faces.count) fonts") { store.addToPlayground(faces.map(\.identity)) }
-            }
+        return Button {
+            overlayColorFor = overlayColorFor == face.id ? nil : face.id
         } label: {
-            Label("Playground", systemImage: "plus.rectangle.on.rectangle")
-                .font(.caption.weight(.medium))
-                .foregroundStyle(ink)
+            Circle()
+                .fill(Color(nsColor: color))
+                .overlay(Circle().stroke(tone.half, lineWidth: 0.5))
+                .frame(width: 12, height: 12)
+                .padding(3)
+                .contentShape(Rectangle())
         }
-        .menuStyle(.borderlessButton)
-        .fixedSize()
-        .padding(.horizontal, 8)
-        .padding(.vertical, 3)
-        .background(ink.opacity(0.12), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).stroke(ink.opacity(0.45)))
-        .help("Add one of these fonts, or all of them, to the Playground")
+        .buttonStyle(.plain)
+        .help("The colour of \(face.family) \(face.style) in Overlay. Click to change it.")
+        .popover(isPresented: Binding(get: { overlayColorFor == face.id }, set: { if !$0 { overlayColorFor = nil } }), arrowEdge: .bottom) {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 8) {
+                    ForEach(overlayPalette, id: \.name) { entry in
+                        Button {
+                            overlayColorHex[face.id] = hexString(Color(nsColor: entry.color.withAlphaComponent(1)))
+                            overlayColorFor = nil
+                        } label: {
+                            Circle()
+                                .fill(Color(nsColor: entry.color.withAlphaComponent(1)))
+                                .overlay(Circle().stroke(AppChrome.ink.opacity(0.35), lineWidth: 1))
+                                .frame(width: 20, height: 20)
+                        }
+                        .buttonStyle(.plain)
+                        .help(entry.name)
+                    }
+                }
+                ColorPicker("Custom", selection: overlayColor(face, index: index), supportsOpacity: false)
+                    .font(AppChrome.small)
+                    .foregroundStyle(AppChrome.ink)
+            }
+            .padding(12)
+            .modifier(ChromeSheet())
+        }
     }
 
     private func referenceFace(_ faces: [FontFace]) -> FontFace? {
@@ -1296,39 +1913,6 @@ struct SpecimenView: View {
             return face
         }
         return faces.first
-    }
-
-    private func referenceMenu(_ faces: [FontFace]) -> some View {
-        let current = referenceFace(faces)
-        return Menu {
-            ForEach(faces) { face in
-                Button {
-                    referenceID = face.id
-                } label: {
-                    if face.id == current?.id {
-                        Label("\(face.family) \(face.style)", systemImage: "checkmark")
-                    } else {
-                        Text("\(face.family) \(face.style)")
-                    }
-                }
-            }
-        } label: {
-            HStack(spacing: 4) {
-                Text(current.map { "From \($0.family)" } ?? "Reference")
-                    .lineLimit(1)
-                Image(systemName: "chevron.up.chevron.down")
-                    .font(.caption2)
-            }
-            .font(.caption.weight(.medium))
-            .foregroundStyle(ink)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(ink.opacity(0.12), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).stroke(ink.opacity(0.45)))
-        }
-        .menuStyle(.borderlessButton)
-        .frame(maxWidth: 220)
-        .help("The font the others line up to")
     }
 
     private func snapAlign(_ faces: [FontFace], metric: (CTFont) -> CGFloat) {
@@ -1352,22 +1936,34 @@ struct SpecimenView: View {
         return read(font)
     }
 
-    private var facesUseAxes: Bool {
-        store.previewFaces.count == 1
-    }
-
+    /// The preview's paper. Info sits on the chrome panel instead.
     private var paper: NSColor {
-        nsColor(hex: backgroundHex, fallback: .white)
+        role == .info ? AppChrome.panelNS : theme.paper
     }
 
     private var paperIsDark: Bool {
-        let color = paper.usingColorSpace(.sRGB) ?? paper
-        let luminance = 0.2126 * color.redComponent + 0.7152 * color.greenComponent + 0.0722 * color.blueComponent
-        return luminance < 0.45
+        role == .info ? theme.themeDark : theme.isDark
+    }
+
+    private var inkNS: NSColor {
+        role == .info ? AppChrome.inkNS : theme.ink
     }
 
     private var ink: Color {
-        Color(nsColor: nsColor(hex: foregroundHex, fallback: .black))
+        Color(nsColor: inkNS)
+    }
+
+    /// The greys of the surface this view sits on: the paper in the workspace, the dark panel for Info.
+    private var tone: Surface { Surface(ink: ink) }
+
+    private var backgroundHex: String { theme.paperHex }
+    private var foregroundHex: String { theme.inkHex }
+
+    /// The grey a selected cut sits on: the paper, a step towards the ink.
+    private var selectedPaper: NSColor {
+        let base = paper.usingColorSpace(.sRGB) ?? paper
+        let top = inkNS.usingColorSpace(.sRGB) ?? inkNS
+        return base.blended(withFraction: 0.15, of: top) ?? base
     }
 
     private func heightBinding(_ id: Int64) -> Binding<CGFloat> {
@@ -1377,59 +1973,12 @@ struct SpecimenView: View {
         )
     }
 
-    private func adjustControls(_ face: FontFace, showAxes: Bool) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            metricRow("Size", value: displaySize, range: sliderRange, step: sliderStep, fraction: unit == .rem ? 2 : 1, reset: { specimenSize = 48 }) {
-                Picker("Unit", selection: $unitRaw) {
-                    ForEach(SpecimenUnit.allCases, id: \.rawValue) { unit in
-                        Text(unit.title).tag(unit.rawValue)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .controlSize(.small)
-                .frame(minWidth: 92, idealWidth: 112, maxWidth: 130)
-                .help("Unit for size and line height: points, CSS pixels, or rem")
-            }
-            metricRow("Spacing", value: $tracking, range: -0.08...0.4, step: 0.01, fraction: 2, reset: { tracking = 0 })
-            metricRow("Line height", value: displayLeading, range: leadingRange, step: sliderStep, fraction: unit == .rem ? 2 : 1, reset: { leading = 1.2 })
-            if showAxes {
-                HStack {
-                    Text("Variable")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    resetButton("Reset variable axes") { variations = [:] }
-                }
-                ForEach(face.axes) { axis in
-                    if axis.max > axis.min {
-                        metricRow(
-                            axis.name,
-                            value: Binding(
-                                get: { variations[axis.tag] ?? axis.defaultValue },
-                                set: { variations[axis.tag] = $0 }
-                            ),
-                            range: axis.min...axis.max,
-                            step: 1,
-                            fraction: 1,
-                            reset: { variations[axis.tag] = nil }
-                        )
-                    }
-                }
-            }
+    private var adjustControls: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            DockSliderRow(title: "Size", value: displaySize, range: sliderRange, step: sliderStep, fraction: unit == .rem ? 2 : 1, reset: { specimenSize = 48 })
+            DockSliderRow(title: "Spacing", value: $tracking, range: -0.08...0.4, step: 0.01, fraction: 2, reset: { tracking = 0 })
+            DockSliderRow(title: "Height", value: displayLeading, range: leadingRange, step: sliderStep, fraction: unit == .rem ? 2 : 1, reset: { leading = 1.2 })
         }
-    }
-
-    private func metricRow<Extra: View>(
-        _ title: String,
-        value: Binding<Double>,
-        range: ClosedRange<Double>,
-        step: Double,
-        fraction: Int,
-        reset: @escaping () -> Void,
-        @ViewBuilder extra: () -> Extra
-    ) -> some View {
-        AdjustRow(title: title, value: value, range: range, step: step, fraction: fraction, reset: reset, extra: extra)
     }
 
     /// Rounds a slider value to its step and keeps it inside the range.
@@ -1439,25 +1988,11 @@ struct SpecimenView: View {
         return min(range.upperBound, max(range.lowerBound, rounded))
     }
 
-    private func metricRow(
-        _ title: String,
-        value: Binding<Double>,
-        range: ClosedRange<Double>,
-        step: Double,
-        fraction: Int,
-        reset: @escaping () -> Void
-    ) -> some View {
-        metricRow(title, value: value, range: range, step: step, fraction: fraction, reset: reset) {
-            EmptyView()
-        }
-    }
-
     private var colorSwatches: some View {
         HStack(spacing: 6) {
             ForEach(SpecimenSwatch.presets) { swatch in
                 Button(swatch.name) {
-                    backgroundHex = swatch.background
-                    foregroundHex = swatch.foreground
+                    theme.choose(paper: swatch.background, ink: swatch.foreground)
                 }
                 .buttonStyle(.paper)
                 .help("Paper and ink: \(swatch.name)")
@@ -1466,10 +2001,11 @@ struct SpecimenView: View {
     }
 
     private var colorReset: some View {
-        resetButton("Reset colors") {
-            backgroundHex = "F6F3EE"
-            foregroundHex = "212121"
+        Button("Theme colours") {
+            theme.followSystem()
         }
+        .buttonStyle(.chip(on: !theme.custom))
+        .help("Back to the paper and ink of the theme chosen in the header")
     }
 
     // MARK: OpenType features
@@ -1498,22 +2034,21 @@ struct SpecimenView: View {
     private func featureSection(_ face: FontFace) -> some View {
         let features = FontFeatures.list(filePath: face.filePath, faceIndex: face.faceIndex)
         if !features.isEmpty {
-            DisclosureGroup(isExpanded: $featuresOpen) {
+            InfoGroup(isExpanded: $featuresOpen) {
                 featureSwitches(face, features: features)
             } label: {
                 HStack(spacing: 6) {
                     Text("OpenType features")
                     Text("\(features.count)")
-                        .font(.caption.monospacedDigit())
+                        .font(.uiCaption.monospacedDigit())
                         .foregroundStyle(.tertiary)
                     if !featureOverrides.isEmpty {
                         Text("· \(featureOverrides.count) changed")
-                            .font(.caption)
+                            .font(.uiCaption)
                             .foregroundStyle(ink.opacity(0.8))
                     }
                 }
             }
-            .font(.headline)
         }
     }
 
@@ -1521,7 +2056,7 @@ struct SpecimenView: View {
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
                     Text("Switches apply to the preview text. Features the font turns on by itself start on.")
-                        .font(.caption2)
+                        .font(.uiCaption2)
                         .foregroundStyle(.tertiary)
                     Spacer()
                     if !featureOverrides.isEmpty {
@@ -1533,7 +2068,7 @@ struct SpecimenView: View {
                     VStack(alignment: .leading, spacing: 4) {
                         if groups.count > 1 {
                             Text(group.name)
-                                .font(.caption2)
+                                .font(.uiCaption2)
                                 .foregroundStyle(.tertiary)
                         }
                         LazyVGrid(columns: [GridItem(.adaptive(minimum: 120), spacing: 6, alignment: .leading)], alignment: .leading, spacing: 6) {
@@ -1551,7 +2086,7 @@ struct SpecimenView: View {
                                                 .foregroundStyle(.secondary)
                                         }
                                     }
-                                    .font(.caption)
+                                    .font(.uiCaption)
                                     .frame(maxWidth: .infinity, alignment: .leading)
                                 }
                                 .toggleStyle(.button)
@@ -1562,7 +2097,7 @@ struct SpecimenView: View {
                     }
                 }
             }
-            .padding(.top, 8)
+            .padding(.top, 2)
     }
 
     private struct FeatureGroup {
@@ -1583,43 +2118,38 @@ struct SpecimenView: View {
     // MARK: Characters
 
     private func characterSection(_ face: FontFace) -> some View {
-        DisclosureGroup("Characters", isExpanded: $charactersOpen) {
+        InfoGroup("Characters", isExpanded: $charactersOpen) {
             if !glyphsLoaded {
                 ProgressView()
                     .controlSize(.small)
-                    .padding(.top, 8)
+                    .padding(.top, 2)
             } else if glyphScalars.isEmpty {
                 Text("This font has no visible characters.")
-                    .font(.caption)
+                    .font(.uiCaption)
                     .foregroundStyle(.secondary)
-                    .padding(.top, 8)
+                    .padding(.top, 2)
             } else {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(spacing: 6) {
-                        Image(systemName: "magnifyingglass")
-                            .foregroundStyle(.secondary)
                         TextField("Character, U+00E9, 00e9, or “e acute”", text: $characterQuery)
                             .textFieldStyle(.plain)
                         if !characterQuery.isEmpty {
-                            Button {
+                            Button("Clear") {
                                 characterQuery = ""
-                            } label: {
-                                Image(systemName: "xmark.circle.fill")
-                                    .foregroundStyle(.secondary)
                             }
-                            .buttonStyle(.plain)
+                            .buttonStyle(.chip())
                             .help("Clear the search")
                         }
                     }
-                    .font(.callout)
+                    .font(.uiCallout)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 5)
                     .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 7))
                     let shown = filteredScalars
                     Text(characterCaption(shown.count))
-                        .font(.caption)
+                        .font(.uiCaption)
                         .foregroundStyle(.secondary)
-                    let font = SpecimenFont.make(path: face.filePath, index: face.faceIndex, size: 18, variations: variations)
+                    let font = SpecimenFont.make(path: face.filePath, index: face.faceIndex, size: 18, variations: store.axisValues[face.id] ?? [:])
                     let searching = !characterQuery.trimmingCharacters(in: .whitespaces).isEmpty
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: searching ? 220 : 108), alignment: .leading)], alignment: .leading, spacing: 6) {
                         ForEach(shown, id: \.value) { scalar in
@@ -1640,7 +2170,7 @@ struct SpecimenView: View {
                                             .foregroundStyle(.secondary)
                                         if searching {
                                             Text(unicodeLabel(scalar))
-                                                .font(.caption2)
+                                                .font(.uiCaption2)
                                                 .lineLimit(1)
                                                 .foregroundStyle(.secondary)
                                         }
@@ -1660,10 +2190,9 @@ struct SpecimenView: View {
                         }
                     }
                 }
-                .padding(.top, 8)
+                .padding(.top, 2)
             }
         }
-        .font(.headline)
     }
 
     /// The characters matching the search: the character itself, its code point in any spelling, or words of its Unicode name.
@@ -1740,8 +2269,8 @@ struct SpecimenView: View {
     ]
 
     private func metadataSection(_ face: FontFace) -> some View {
-        DisclosureGroup("Metadata", isExpanded: $metadataOpen) {
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 220), alignment: .leading)], alignment: .leading, spacing: 8) {
+        InfoGroup("Metadata", isExpanded: $metadataOpen) {
+            VStack(alignment: .leading, spacing: 0) {
                 meta("Family", face.family)
                 meta("Style", face.style)
                 meta("Full name", face.fullName)
@@ -1762,70 +2291,65 @@ struct SpecimenView: View {
                 meta("File size", fileSize(face.fileSize))
                 meta("Modified", face.modifiedAt.formatted(Date.FormatStyle(date: .abbreviated, time: .shortened).locale(Locale(identifier: "en_US"))))
             }
-            .padding(.top, 8)
+            .padding(.top, 2)
             if !face.copyright.isEmpty {
                 Text(face.copyright)
-                    .font(.caption)
+                    .font(.uiCaption)
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.top, 6)
             }
         }
-        .font(.headline)
     }
 
     private func infoSection(_ face: FontFace) -> some View {
-        DisclosureGroup("Info", isExpanded: $infoOpen) {
+        InfoGroup("Activation", isExpanded: $infoOpen) {
             VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text(face.activation.label)
-                    .font(.caption.weight(.semibold))
+                    .font(.uiCaption.weight(.semibold))
                     .padding(.horizontal, 8)
                     .padding(.vertical, 3)
+                    .foregroundStyle(face.activation.isAvailableToApps ? Color(nsColor: paper) : ink)
                     .background(
-                        face.activation.isAvailableToApps ? Color.green.opacity(0.18) : Color.secondary.opacity(0.12),
+                        face.activation.isAvailableToApps ? ink : ink.opacity(0.14),
                         in: Capsule()
                     )
+                    .help(face.activation.isAvailableToApps ? "Other apps can use this cut" : "Other apps cannot see this cut yet")
                 Spacer()
                 if face.canActivate || face.canDeactivate {
-                    Button {
+                    Button(face.canDeactivate ? "Deactivate" : "Activate") {
                         store.toggle(face)
-                    } label: {
-                        Label(
-                            face.canDeactivate ? "Deactivate" : "Activate",
-                            systemImage: face.canDeactivate ? "minus.circle" : "checkmark.circle"
-                        )
                     }
-                    .buttonStyle(.paperProminent)
+                    .buttonStyle(.paper)
                     .help("Activate makes the font available to other apps; Deactivate removes it again")
                 }
             }
             if store.selection.count > 1 {
                 Text("\(store.selection.count) fonts selected. The toolbar acts on the whole selection.")
-                    .font(.callout)
+                    .font(.uiCallout)
                     .foregroundStyle(.secondary)
             }
             Text(helpText(face))
-                .font(.callout)
+                .font(.uiCallout)
                 .foregroundStyle(ink.opacity(0.82))
                 .fixedSize(horizontal: false, vertical: true)
             }
-            .padding(.top, 8)
+            .padding(.top, 2)
         }
-        .font(.headline)
     }
 
     private func listSection(_ face: FontFace) -> some View {
         let lists = store.lists(containing: face)
         let familyCount = store.familyFaceCount(face)
-        return DisclosureGroup("Lists", isExpanded: $listsOpen) {
+        return InfoGroup("Lists", isExpanded: $listsOpen) {
             VStack(alignment: .leading, spacing: 12) {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("Standard list")
-                        .font(.subheadline.weight(.semibold))
+                        .font(.uiSubheadline.weight(.semibold))
                     Text("A font can belong to more than one standard list.")
-                        .font(.caption)
+                        .font(.uiCaption)
                         .foregroundStyle(.secondary)
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 120), alignment: .leading)], alignment: .leading, spacing: 6) {
                         ForEach(FontCategory.allCases, id: \.self) { category in
@@ -1836,11 +2360,11 @@ struct SpecimenView: View {
                                 HStack(spacing: 5) {
                                     if selected {
                                         Image(systemName: "checkmark")
-                                            .font(.caption.weight(.bold))
+                                            .font(.uiCaption.weight(.bold))
                                     }
                                     Text(category.rawValue)
                                 }
-                                .font(.callout.weight(selected ? .semibold : .regular))
+                                .font(.uiCallout.weight(selected ? .semibold : .regular))
                                 .padding(.horizontal, 12)
                                 .padding(.vertical, 6)
                                 .foregroundStyle(selected ? Color(nsColor: paper) : ink)
@@ -1853,13 +2377,13 @@ struct SpecimenView: View {
                     }
                     if familyCount > 1 {
                         Toggle("Apply to all \(familyCount) styles", isOn: $fileWholeFamily)
-                            .font(.callout)
+                            .font(.uiCallout)
                             .help("File every style of the family at once")
                     }
                 }
                 VStack(alignment: .leading, spacing: 8) {
                     Text("Your lists")
-                        .font(.subheadline.weight(.semibold))
+                        .font(.uiSubheadline.weight(.semibold))
                     if lists.isEmpty {
                         Text("This font is not in a list.")
                             .foregroundStyle(.secondary)
@@ -1876,16 +2400,13 @@ struct SpecimenView: View {
                     }
                 }
             }
-            .padding(.top, 8)
+            .padding(.top, 2)
         }
-        .font(.headline)
     }
 
     private func finderSection(_ face: FontFace) -> some View {
-        Button {
+        Button("Show in Finder") {
             store.reveal(face)
-        } label: {
-            Label("Show in Finder", systemImage: "folder")
         }
         .buttonStyle(.paper)
         .help("Show the file in the Finder: \(face.filePath)")
@@ -1936,38 +2457,34 @@ struct SpecimenView: View {
     private var backgroundColor: Binding<Color> {
         Binding(
             get: { Color(nsColor: nsColor(hex: backgroundHex, fallback: .white)) },
-            set: { backgroundHex = hexString($0) }
+            set: { theme.choose(paper: hexString($0)) }
         )
     }
 
     private var foregroundColor: Binding<Color> {
         Binding(
             get: { Color(nsColor: nsColor(hex: foregroundHex, fallback: .black)) },
-            set: { foregroundHex = hexString($0) }
+            set: { theme.choose(ink: hexString($0)) }
         )
     }
 
     private func cutMenu(_ face: FontFace, cuts: [FontFace]) -> some View {
         // One Text only: the macOS menu button keeps just the first text of a composed label, which dropped the style name.
         let label = Text("\(face.isVariable ? "Instance" : "Cut"): \(face.style)")
-            .font(.caption2.weight(.semibold))
+            .font(AppChrome.small)
             .lineLimit(1)
             .foregroundStyle(ink)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .background(ink.opacity(0.12), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).stroke(ink.opacity(0.45)))
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2.5)
+        .background(ink.opacity(0.14), in: RoundedRectangle(cornerRadius: 4, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 4, style: .continuous).stroke(ink.opacity(0.22), lineWidth: 0.5))
 
         return Group {
             if cuts.count > 1 {
                 Menu {
                     ForEach(cuts) { cut in
                         Button {
-                            // Work from what is on screen: a family preview can show faces that are not selected themselves.
-                            var ids = Set(store.previewFaces.map(\.id))
-                            ids.remove(face.id)
-                            ids.insert(cut.id)
-                            store.selection = ids
+                            store.selectInPreview(cut)
                         } label: {
                             if cut.id == face.id {
                                 Label(cut.style, systemImage: "checkmark")
@@ -1993,29 +2510,16 @@ struct SpecimenView: View {
     private func activationButton(_ face: FontFace) -> some View {
         let active = face.activation.isAvailableToApps
         let title = active ? (face.canDeactivate ? "Active" : face.activation.label) : "Activate"
-        return Button {
+        return Button(title) {
             store.toggle(face)
-        } label: {
-            HStack(spacing: 5) {
-                Circle()
-                    .fill(active ? Color.green : Color.clear)
-                    .overlay(Circle().stroke(ink.opacity(0.7), lineWidth: 1))
-                    .frame(width: 8, height: 8)
-                Text(title)
-                    .font(.caption2.weight(.semibold))
-            }
-            .foregroundStyle(ink)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(active ? Color.green.opacity(0.22) : ink.opacity(0.12), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).stroke(ink.opacity(0.45)))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.chip(on: active))
         .disabled(!face.canActivate && !face.canDeactivate)
         .help(active
             ? (face.canDeactivate ? "This cut is active. Click to deactivate it." : "This cut is already available to other apps.")
             : "Activate this file so other apps can use it.")
     }
+
 
     private func paperButton(_ title: String, help: String, action: @escaping () -> Void) -> some View {
         Button(title, action: action)
@@ -2023,38 +2527,26 @@ struct SpecimenView: View {
             .help(help)
     }
 
-    private func paperReset(_ help: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: "arrow.counterclockwise")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(ink)
-                .padding(5)
-                .background(ink.opacity(0.12), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
-                .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).stroke(ink.opacity(0.45)))
-        }
-        .buttonStyle(.plain)
-        .help(help)
-    }
-
     private func resetButton(_ help: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: "arrow.counterclockwise")
-        }
-        .buttonStyle(.borderless)
-        .help(help)
+        IconChip(symbol: "arrow.counterclockwise", help: help, action: action)
     }
 
+    /// One line of Metadata: the label in grey, the value beside it.
     private func meta(_ label: String, _ value: String) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
             Text(label)
-                .font(.caption)
-                .foregroundStyle(ink.opacity(0.72))
+                .font(AppChrome.type())
+                .foregroundStyle(ink.opacity(0.5))
+                .frame(width: 82, alignment: .leading)
             Text(value.isEmpty ? "—" : value)
-                .font(.body)
+                .font(AppChrome.type())
+                .foregroundStyle(ink)
                 .textSelection(.enabled)
-                .lineLimit(2)
+                .lineLimit(3)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(.vertical, 4)
+        .padding(.vertical, 1.5)
     }
 
     private func helpText(_ face: FontFace) -> String {
@@ -2120,7 +2612,7 @@ private struct NoteEditor: NSViewRepresentable {
         textView.autoresizingMask = [.width]
         textView.textContainerInset = NSSize(width: 6, height: 6)
         textView.textContainer?.widthTracksTextView = true
-        textView.font = .systemFont(ofSize: NSFont.systemFontSize)
+        textView.font = AppChrome.nsFont(12)
         textView.drawsBackground = true
         textView.backgroundColor = .textBackgroundColor
         textView.delegate = context.coordinator
@@ -2173,7 +2665,7 @@ private final class NoteTextView: NSTextView {
         super.draw(dirtyRect)
         guard string.isEmpty else { return }
         let attributes: [NSAttributedString.Key: Any] = [
-            .font: font ?? NSFont.systemFont(ofSize: NSFont.systemFontSize),
+            .font: font ?? AppChrome.nsFont(12),
             .foregroundColor: NSColor.placeholderTextColor
         ]
         ("Note" as NSString).draw(
@@ -2222,6 +2714,16 @@ private final class SpecimenTextView: NSTextView {
     override func scrollWheel(with event: NSEvent) {
         ScrollWheelForwarding.pass(event, from: self)
     }
+
+    var onFocus: (() -> Void)?
+
+    /// A click into the sample selects its cut. Reported after the click, so the view update does not interrupt it.
+    override func mouseDown(with event: NSEvent) {
+        if let onFocus {
+            DispatchQueue.main.async(execute: onFocus)
+        }
+        super.mouseDown(with: event)
+    }
 }
 
 private struct SpecimenSwatch: Identifiable {
@@ -2231,6 +2733,7 @@ private struct SpecimenSwatch: Identifiable {
     var id: String { name }
 
     static let presets = [
+        SpecimenSwatch(name: "Studio", background: "1F1F1F", foreground: "F5F5F5"),
         SpecimenSwatch(name: "Paper", background: "F6F3EE", foreground: "212121"),
         SpecimenSwatch(name: "White", background: "FFFFFF", foreground: "1A1A1A"),
         SpecimenSwatch(name: "Black", background: "141414", foreground: "F5F5F2")
@@ -2273,6 +2776,58 @@ enum SpecimenParagraph {
     }
 }
 
+/// A part of Info that folds to its title. Set like a section of the navigation: the title in its size and
+/// weight, the small arrow at the right as on Info itself, the rows right under it.
+struct InfoGroup<Label: View, Content: View>: View {
+    @Binding var isExpanded: Bool
+    @ViewBuilder var content: Content
+    @ViewBuilder var label: Label
+    @Environment(\.surface) private var surface
+
+    init(isExpanded: Binding<Bool>, @ViewBuilder content: () -> Content, @ViewBuilder label: () -> Label) {
+        _isExpanded = isExpanded
+        self.content = content()
+        self.label = label()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Button {
+                isExpanded.toggle()
+            } label: {
+                HStack(spacing: 6) {
+                    label
+                        .font(AppChrome.type(12, weight: .medium))
+                        .foregroundStyle(surface.ink)
+                    Spacer(minLength: 4)
+                    ChromeChevron(open: isExpanded, color: surface.half)
+                }
+                .frame(height: 24)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(isExpanded ? "Fold this part away" : "Show this part")
+            if isExpanded {
+                content
+                    .font(AppChrome.type())
+                    .padding(.bottom, 8)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+extension InfoGroup where Label == Text {
+    init(_ title: String, isExpanded: Binding<Bool>, @ViewBuilder content: () -> Content) {
+        self.init(isExpanded: isExpanded, content: content) { Text(title) }
+    }
+}
+
+extension OutsideFont {
+    /// Source and name. The address can change once the foundry's own page is found; these two stay.
+    var nameKey: String { source + "\n" + name }
+}
+
 /// Fonts for previews, made from the file itself (and its variation settings). Used by the Playground export too.
 enum SpecimenFont {
     static func make(path: String, index: Int, size: CGFloat, variations: [UInt32: Double], features: [[CFString: Any]] = []) -> NSFont? {
@@ -2296,6 +2851,8 @@ enum SpecimenFont {
             if !features.isEmpty {
                 next = CTFontDescriptorCreateCopyWithAttributes(next, [kCTFontFeatureSettingsAttribute: features] as CFDictionary)
             }
+            // Dragging an axis asks for a new descriptor at every step; the store starts over before it grows large.
+            if descriptors.count > 600 { descriptors.removeAll(keepingCapacity: true) }
             descriptors[key] = next
             descriptor = next
         }
@@ -2318,6 +2875,8 @@ struct SpecimenEditor: NSViewRepresentable {
     /// Core Text feature settings (OpenType tags or AAT selectors) switched away from the font's defaults.
     var features: [[CFString: Any]] = []
     @Binding var measuredHeight: CGFloat
+    /// Called when a click puts the cursor into the text, so the cut can be selected.
+    var onFocus: (() -> Void)?
 
     func makeCoordinator() -> Coordinator {
         Coordinator(text: $text, measuredHeight: $measuredHeight)
@@ -2345,6 +2904,7 @@ struct SpecimenEditor: NSViewRepresentable {
     func updateNSView(_ textView: NSTextView, context: Context) {
         context.coordinator.text = $text
         context.coordinator.measuredHeight = $measuredHeight
+        (textView as? SpecimenTextView)?.onFocus = onFocus
         if textView.string != text {
             let selected = textView.selectedRanges
             textView.string = text
@@ -2535,9 +3095,15 @@ private final class AlignColumnView: NSView {
         stroke(context, y: baseline + referenceShift, label: "")
 
         if stacked {
-            for (index, face) in faces.enumerated() {
+            // The font that was clicked lies on top; each keeps the colour of its place among the pinned fonts.
+            let order = faces.indices.sorted { lhs, rhs in
+                let left = faces[lhs].id == focusedID
+                let right = faces[rhs].id == focusedID
+                return left == right ? lhs < rhs : !left
+            }
+            for index in order {
                 let color = colors.isEmpty ? textColor : colors[index % colors.count]
-                drawFace(face, context: context, x: 16, width: bounds.width - 24, baseline: baseline, color: color)
+                drawFace(faces[index], context: context, x: 16, width: bounds.width - 24, baseline: baseline, color: color)
             }
             return
         }
@@ -2552,11 +3118,19 @@ private final class AlignColumnView: NSView {
                 context.strokePath()
             }
             let name = "\(face.family) · \(face.style)" as NSString
+            // A name longer than its column is cut short, so it stays out of the next one.
+            let nameStyle = NSMutableParagraphStyle()
+            nameStyle.lineBreakMode = .byTruncatingTail
             let nameAttributes: [NSAttributedString.Key: Any] = [
-                .font: NSFont.systemFont(ofSize: 10, weight: face.id == reference?.id ? .semibold : .regular),
-                .foregroundColor: textColor.withAlphaComponent(face.id == reference?.id ? 1 : 0.82)
+                .font: AppChrome.nsFont(10, weight: face.id == reference?.id ? .medium : .regular),
+                .foregroundColor: textColor.withAlphaComponent(face.id == reference?.id ? 1 : 0.82),
+                .paragraphStyle: nameStyle
             ]
-            name.draw(at: CGPoint(x: column + 10, y: bounds.height - 18), withAttributes: nameAttributes)
+            let nameHeight = ceil(name.size(withAttributes: nameAttributes).height)
+            name.draw(
+                in: CGRect(x: column + 10, y: bounds.height - 18, width: max(width - 18, 1), height: nameHeight),
+                withAttributes: nameAttributes
+            )
             drawFace(face, context: context, x: column + 10, width: max(width - 12, 1), baseline: baseline, color: textColor)
         }
     }
@@ -2691,40 +3265,61 @@ private final class AlignColumnView: NSView {
         guard !label.isEmpty else { return }
         let text = label as NSString
         text.draw(at: CGPoint(x: 8, y: y + 2), withAttributes: [
-            .font: NSFont.systemFont(ofSize: 9),
+            .font: AppChrome.nsFont(9),
             .foregroundColor: guideColor
         ])
     }
 }
 
-private enum PreviewPanel {
-    case adjust
-    case info
-}
+/// One workspace tab. The open tab has no line under it and full-strength text; the others sit a shade darker.
+/// Fonts can be dropped on it.
+private struct WorkspaceTabCell: View {
+    var title: String
+    var active: Bool
+    var onFonts: ([String]) -> Bool
+    var action: () -> Void
+    @State private var hovering = false
+    @State private var targeted = false
+    @Environment(\.surface) private var surface
+    @Environment(\.colorScheme) private var colorScheme
 
-private struct PanelHeightKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = max(value, nextValue())
-    }
-}
-
-private struct FittedPanel<Content: View>: View {
-    var maxHeight: CGFloat = 300
-    @ViewBuilder var content: () -> Content
-    @State private var height: CGFloat = 0
+    /// How much darker than the paper a closed tab sits.
+    private var shade: Double { colorScheme == .dark ? 0.22 : 0.07 }
 
     var body: some View {
-        ScrollView {
-            content()
+        Button(action: action) {
+            Text(title)
+                .font(AppChrome.type(12, weight: active ? .medium : .regular))
+                .foregroundStyle(active || hovering || targeted ? surface.ink : surface.half)
+                .lineLimit(1)
+                .padding(.leading, 12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(height: 27)
                 .background {
-                    GeometryReader { proxy in
-                        Color.clear.preference(key: PanelHeightKey.self, value: proxy.size.height)
+                    Rectangle().fill(targeted ? surface.selection : active ? Color.clear : Color.black.opacity(shade * (hovering ? 0.45 : 1)))
+                }
+                .overlay(alignment: .bottom) {
+                    if !active {
+                        Rectangle().fill(surface.hairline).frame(height: 0.5)
                     }
                 }
+                .overlay(alignment: .trailing) {
+                    Rectangle().fill(surface.hairline).frame(width: 0.5)
+                }
+                .contentShape(Rectangle())
         }
-        .scrollDisabled(height <= maxHeight)
-        .frame(height: min(max(height, 1), maxHeight))
-        .onPreferenceChange(PanelHeightKey.self) { height = $0 }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .dropDestination(for: FontDragItem.self) { items, _ in
+            onFonts(items.flatMap(\.identities))
+        } isTargeted: { targeted = $0 }
     }
+}
+
+/// A run of preview cuts that share a family, shown as one card.
+private struct FamilyCluster: Identifiable {
+    var family: String
+    var faces: [FontFace]
+    /// Named after its first cut, so the same family twice in a sorted list stays two cards.
+    var id: String { "family:\(faces.first?.identity ?? family)" }
 }

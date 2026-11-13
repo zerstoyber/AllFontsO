@@ -51,7 +51,7 @@ struct FontBrowserView: View {
         .overlay {
             if fileDropTargeted {
                 RoundedRectangle(cornerRadius: 12)
-                    .stroke(Color.accentColor, lineWidth: 2)
+                    .stroke(AppChrome.highlight, lineWidth: 2)
                     .padding(6)
                     .allowsHitTesting(false)
             }
@@ -124,7 +124,7 @@ struct FontBrowserView: View {
                     if !store.query.isEmpty {
                         let footprint = store.filterFootprint
                         Text("\(footprint.shown) of \(footprint.total) \(store.countUnit)")
-                            .font(.caption)
+                            .font(.uiCaption)
                             .foregroundStyle(.secondary)
                             .monospacedDigit()
                             .help("Shown out of all in this view. Switch between families and styles under Filter.")
@@ -150,11 +150,11 @@ struct FontBrowserView: View {
             store.toggleSearchField(scope)
         } label: {
             Text(scope.title)
-                .font(.caption.weight(.medium))
+                .font(.uiCaption.weight(.medium))
                 .padding(.horizontal, 8)
                 .padding(.vertical, 3)
-                .background(active ? Color.accentColor.opacity(0.18) : Color.secondary.opacity(0.08), in: Capsule())
-                .foregroundStyle(active ? Color.accentColor : Color.secondary)
+                .background(active ? AppChrome.highlight.opacity(0.18) : Color.secondary.opacity(0.08), in: Capsule())
+                .foregroundStyle(active ? AppChrome.highlight : Color.secondary)
         }
         .buttonStyle(.plain)
         .help(scope == .all ? "Search every field" : "Search the \(scope.title.lowercased()) field. Several can be on at once.")
@@ -171,14 +171,14 @@ struct FontBrowserView: View {
             Spacer(minLength: 8)
             Button("Clear filters") { store.clearFilters() }
                 .buttonStyle(.borderless)
-                .foregroundStyle(Color.accentColor)
+                .foregroundStyle(AppChrome.highlight)
                 .help("Show everything this view holds again")
         }
-        .font(.caption)
-        .foregroundStyle(Color.accentColor)
+        .font(.uiCaption)
+        .foregroundStyle(AppChrome.highlight)
         .padding(.horizontal, 12)
         .padding(.vertical, 5)
-        .background(Color.accentColor.opacity(0.12))
+        .background(AppChrome.highlight.opacity(0.12))
         .help("Only part of this view is shown. Open the Filter menu to change what is held back.")
     }
 
@@ -191,14 +191,14 @@ struct FontBrowserView: View {
             Spacer(minLength: 8)
             Button("Back to your order") { store.backToOwnOrder() }
                 .buttonStyle(.borderless)
-                .foregroundStyle(Color.accentColor)
+                .foregroundStyle(AppChrome.highlight)
                 .help("Go back to the order you arranged by hand")
         }
-        .font(.caption)
+        .font(.uiCaption)
         .foregroundStyle(.secondary)
         .padding(.horizontal, 12)
         .padding(.vertical, 5)
-        .background(Color.accentColor.opacity(0.08))
+        .background(AppChrome.highlight.opacity(0.08))
     }
 
     private var searchPrompt: String {
@@ -381,7 +381,7 @@ struct FontBrowserView: View {
                                 showAddOutside = true
                             } label: {
                                 Label("Add a font from outside the library…", systemImage: "plus.circle")
-                                    .font(.callout)
+                                    .font(.uiCallout)
                                     .foregroundStyle(.secondary)
                                     .padding(.horizontal, 6)
                                     .padding(.vertical, 3)
@@ -402,7 +402,7 @@ struct FontBrowserView: View {
                     Section {
                         if !insideCollapsed, store.browseGroups.allSatisfy(\.families.isEmpty), store.query.isEmpty {
                             Text(emptyFilterText)
-                                .font(.callout)
+                                .font(.uiCallout)
                                 .foregroundStyle(.secondary)
                                 .padding(.horizontal, 6)
                                 .padding(.vertical, 8)
@@ -490,7 +490,7 @@ struct FontBrowserView: View {
         } label: {
             HStack(spacing: 6) {
                 Image(systemName: collapsed.wrappedValue ? "chevron.right" : "chevron.down")
-                    .font(.caption2.weight(.semibold))
+                    .font(.uiCaption2.weight(.semibold))
                     .frame(width: 10)
                 Image(systemName: symbol)
                 Text(title)
@@ -514,18 +514,18 @@ struct FontBrowserView: View {
         } label: {
             HStack(alignment: .top, spacing: 8) {
                 Image(systemName: "globe")
-                    .font(.caption)
+                    .font(.uiCaption)
                     .foregroundStyle(.secondary)
                     .frame(width: 14, height: 16)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(item.name)
                     Text(item.source.isEmpty ? item.url.host() ?? "" : item.source)
-                        .font(.caption)
+                        .font(.uiCaption)
                         .foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 8)
                 Text("WEB")
-                    .font(.caption2.weight(.semibold))
+                    .font(.uiCaption2.weight(.semibold))
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 6)
                     .padding(.vertical, 2)
@@ -536,7 +536,7 @@ struct FontBrowserView: View {
             .padding(.vertical, 4)
             .contentShape(Rectangle())
             .background(
-                picked ? Color.accentColor.opacity(0.16) : Color.secondary.opacity(0.05),
+                picked ? AppChrome.highlight.opacity(0.16) : Color.secondary.opacity(0.05),
                 in: RoundedRectangle(cornerRadius: 6)
             )
             .overlay(
@@ -575,7 +575,7 @@ struct FontBrowserView: View {
                     }
                 } label: {
                     Image(systemName: expanded ? "chevron.down" : "chevron.right")
-                        .font(.caption2.weight(.semibold))
+                        .font(.uiCaption2.weight(.semibold))
                         .foregroundStyle(.secondary)
                         .frame(width: 14, height: 12)
                 }
@@ -589,7 +589,7 @@ struct FontBrowserView: View {
                         .lineLimit(1)
                         .layoutPriority(1)
                     Text(familyDetail(family))
-                        .font(.caption)
+                        .font(.uiCaption)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
@@ -603,13 +603,13 @@ struct FontBrowserView: View {
             }
             if family.representative.isVariable {
                 Text("VAR")
-                    .font(.caption2.weight(.semibold))
+                    .font(.uiCaption2.weight(.semibold))
                     .padding(.horizontal, 6)
                     .padding(.vertical, 2)
-                    .background(Color.accentColor.opacity(0.14), in: Capsule())
+                    .background(AppChrome.highlight.opacity(0.14), in: Capsule())
             }
             Text(formatLabel(family))
-                .font(.caption2.weight(.medium))
+                .font(.uiCaption2.weight(.medium))
                 .foregroundStyle(.secondary)
                 .padding(.top, 2)
                 .help(formatHelp(family))
@@ -821,7 +821,7 @@ private struct FontRow: View {
             } label: {
                 Image(systemName: face.activation.isAvailableToApps ? "checkmark.square.fill" : "square")
                     .font(.system(size: 15))
-                    .foregroundStyle(face.activation.isAvailableToApps ? Color.accentColor : Color.secondary)
+                    .foregroundStyle(face.activation.isAvailableToApps ? AppChrome.highlight : Color.secondary)
             }
             .buttonStyle(.borderless)
             .disabled(!canToggle)
@@ -833,7 +833,7 @@ private struct FontRow: View {
                     FamilySample(face: face, text: sample, size: sampleSize)
                 }
                 Text(subtitle)
-                    .font(.caption)
+                    .font(.uiCaption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
@@ -845,7 +845,7 @@ private struct FontRow: View {
                 badge("VAR")
             }
             Text(face.format.uppercased())
-                .font(.caption2.weight(.medium))
+                .font(.uiCaption2.weight(.medium))
                 .foregroundStyle(.secondary)
             Button {
                 store.toggleFavorite(face)
@@ -893,7 +893,7 @@ private struct FontRow: View {
 
     private func badge(_ text: String) -> some View {
         Text(text)
-            .font(.caption2.weight(.semibold))
+            .font(.uiCaption2.weight(.semibold))
             .padding(.horizontal, 6)
             .padding(.vertical, 2)
             .background(.quaternary, in: Capsule())
@@ -907,7 +907,7 @@ struct ListColumnBar: View {
     var body: some View {
         HStack(spacing: 8) {
             Text(store.filterTitle)
-                .font(.headline)
+                .font(.uiHeadline)
                 .lineLimit(1)
                 .layoutPriority(1)
             Spacer(minLength: 8)
@@ -976,7 +976,7 @@ struct ListColumnBar: View {
             store.sortAscending.toggle()
         } label: {
             Image(systemName: store.sortAscending ? "arrow.up" : "arrow.down")
-                .font(.caption.weight(.semibold))
+                .font(.uiCaption.weight(.semibold))
                 .frame(width: 14)
         }
         .buttonStyle(.bordered)
@@ -1016,7 +1016,7 @@ struct ListColumnBar: View {
                 Image(systemName: store.activeFilterCount > 0 ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle")
                 Text(store.activeFilterCount > 0 ? "Filter · \(store.activeFilterCount)" : "Filter")
             }
-            .foregroundStyle(store.activeFilterCount > 0 ? Color.accentColor : Color.primary)
+            .foregroundStyle(store.activeFilterCount > 0 ? AppChrome.highlight : Color.primary)
         }
         .menuStyle(.borderlessButton)
         .fixedSize()

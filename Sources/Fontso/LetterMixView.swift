@@ -2,22 +2,24 @@ import AppKit
 import FontsoCore
 import SwiftUI
 
-/// Mix: every letter of a text set in its own cut. The cuts come from the preview, from the whole view at random,
-/// or from families close to the first preview font in x-height and letter width. Letters take a cut at random or in turn,
+/// Mix, under the pinned fonts of Shape: every letter of the sample text set in its own cut. The cuts are the
+/// pinned ones, or come from the whole view at random, or from families close to the selected font in x-height and
+/// letter width. Letters take a cut at random or in turn,
 /// and any letter can be given a cut by hand. Size, spacing, and line height are the preview's own.
 struct LetterMixView: View {
     @Environment(LibraryStore.self) private var store
-    @AppStorage("fontso.mix.text") private var text = "Handgloves"
+    /// The sample text of Preview, Compare, and Shape: what is typed in one shows in all.
+    @AppStorage("fontso.sampleText") private var text = SpecimenText.standard
     @AppStorage("fontso.specimenSize") private var size = 48.0
     @AppStorage("fontso.specimen.unit") private var unitRaw = SpecimenUnit.point.rawValue
     @AppStorage("fontso.specimen.tracking") private var tracking = 0.0
     @AppStorage("fontso.specimen.leading") private var leading = 1.2
-    @AppStorage("fontso.mix.source") private var sourceRaw = MixSource.chosen.rawValue
+    /// A mix starts from the pinned cuts.
+    @AppStorage("fontso.mix.cuts") private var sourceRaw = MixSource.chosen.rawValue
     @AppStorage("fontso.mix.count") private var count = 6
     @AppStorage("fontso.mix.order") private var orderRaw = MixOrder.random.rawValue
     @AppStorage("fontso.mix.sameLetter") private var sameLetter = false
-    @AppStorage("fontso.specimen.background") private var backgroundHex = "F6F3EE"
-    @AppStorage("fontso.specimen.foreground") private var foregroundHex = "212121"
+    @ObservedObject private var theme = PaperSettings.shared
     @AppStorage("fontso.mix.adjustOpen") private var adjustOpen = true
     @Environment(\.undoManager) private var undoManager
     @StateObject private var model = MixModel()
@@ -42,10 +44,11 @@ struct LetterMixView: View {
         let letters = MixText.letters(in: text)
         let assigned = assignment(letters, cuts: cuts, known: known)
         VStack(spacing: 0) {
+            controls(cuts)
+                .settingsBar()
             ZStack(alignment: .bottom) {
                 ColumnScroll(bottomInset: adjustHeight + 28) {
                     VStack(alignment: .leading, spacing: 16) {
-                        controls(cuts)
                         board(letters, assigned: assigned, cuts: cuts)
                         let picked = selectedLetters(letters)
                         if !picked.isEmpty, !cuts.isEmpty {
@@ -55,21 +58,20 @@ struct LetterMixView: View {
                     .padding(16)
                     .frame(maxWidth: .infinity, alignment: .topLeading)
                 }
-                .background(Color(nsColor: paper))
-                HStack(spacing: 0) {
-                    Spacer(minLength: 10)
-                    adjustDock(cuts)
-                        .frame(maxWidth: 720)
-                    Spacer(minLength: 10)
-                }
-                .padding(.bottom, 12)
-                .reportOverlayHeight()
+                adjustDock(cuts)
+                    .padding(.horizontal, AppChrome.dockInset)
+                    .padding(.bottom, 12)
+                    .reportOverlayHeight()
             }
             .onPreferenceChange(OverlayHeightKey.self) { adjustHeight = $0 }
-            .environment(\.colorScheme, paperIsDark ? .dark : .light)
         }
         .dropDestination(for: FontDragItem.self) { items, _ in
             addToPool(items.flatMap(\.identities))
+        }
+        // From the three dots beside the pinned fonts: the mix as a block, with its letters, size, spacing, and line height.
+        .onReceive(NotificationCenter.default.publisher(for: .fontsoMixToPlayground)) { _ in
+            guard !cuts.isEmpty, !text.isEmpty else { return }
+            sendToPlayground(cuts)
         }
         .task(id: refillKey) {
             // After an undo the pool already belongs to this key; keep it.
@@ -83,29 +85,25 @@ struct LetterMixView: View {
     // MARK: Controls
 
     private func controls(_ cuts: [FontFace]) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 10) {
-                Picker("Cuts", selection: undoable($sourceRaw, "Change Cuts")) {
-                    ForEach(MixSource.allCases) { option in
-                        Text(option.title).tag(option.rawValue)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .fixedSize()
-                .help("Where the cuts come from")
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                ChromeSegments(
+                    items: MixSource.allCases.map { .init(title: $0.title, value: $0.rawValue, help: $0.help) },
+                    selection: undoable($sourceRaw, "Change Cuts"),
+                    compact: true
+                )
                 if source != .chosen {
                     Stepper("\(count) cuts", value: undoable($count, "Change Number of Cuts"), in: 2...16)
+                        .font(AppChrome.small)
+                        .controlSize(.mini)
                         .fixedSize()
                         .help("How many cuts take part")
-                    Button {
+                    Button("New cuts") {
                         let before = model.snapshot
                         Task {
                             await refill()
                             model.registerUndo(from: before, undoManager, "New Cuts")
                         }
-                    } label: {
-                        Label("New cuts", systemImage: "arrow.triangle.2.circlepath")
                     }
                     .disabled(finding)
                     .help(source == .random ? "Pick other cuts at random" : "Pick other cuts close to the reference")
@@ -113,142 +111,89 @@ struct LetterMixView: View {
                         ProgressView().controlSize(.small)
                     }
                 }
-                Spacer(minLength: 0)
-                Button {
-                    sendToPlayground(cuts)
-                } label: {
-                    Label("To Playground", systemImage: "square.text.square")
-                }
-                .disabled(cuts.isEmpty || text.isEmpty)
-                .help("Add this mix to the Playground as a block, with its letters, size, spacing, and line height")
-            }
-            HStack(spacing: 10) {
-                Picker("Letters", selection: undoable($orderRaw, "Change Letter Order")) {
-                    ForEach(MixOrder.allCases) { option in
-                        Text(option.title).tag(option.rawValue)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .fixedSize()
-                .help("How letters without a cut of their own get one")
-                Button {
+                ChromeSegments(
+                    items: MixOrder.allCases.map { .init(title: $0.title, value: $0.rawValue, help: $0.help) },
+                    selection: undoable($orderRaw, "Change Letter Order"),
+                    compact: true
+                )
+                Button("Shuffle") {
                     model.change(undoManager, "Shuffle Letters") {
                         model.seed = UInt64.random(in: 1...UInt64.max)
                         deal(keepingDealt: false)
                     }
-                } label: {
-                    Label("Shuffle letters", systemImage: "dice")
                 }
                 .disabled(order != .random || cuts.count < 2)
                 .help("Deal the cuts to the letters again. Letters given a cut by hand keep it.")
-                Toggle("Same letter, same cut", isOn: undoable($sameLetter, "Same Letter, Same Cut"))
-                    .toggleStyle(.checkbox)
-                    .help("Every “a” in the text shares one cut")
+                Button("Same letter, same cut") {
+                    undoable($sameLetter, "Same Letter, Same Cut").wrappedValue.toggle()
+                }
+                .buttonStyle(.chip(on: sameLetter))
+                .help("Every “a” in the text shares one cut")
                 if !byPosition.isEmpty || !byLetter.isEmpty {
-                    Button("Clear hand-picked") {
+                    Button {
                         model.change(undoManager, "Clear Hand-Picked") {
                             model.byPosition = [:]
                             model.byLetter = [:]
                         }
+                    } label: {
+                        Label("Hand-picked", systemImage: "arrow.counterclockwise")
                     }
-                    .help("Letters go back to the shuffle")
+                    .help("Reset the hand-picked letters: they go back to the shuffle")
                 }
                 Spacer(minLength: 0)
             }
         }
-        .controlSize(.small)
-        .buttonStyle(.paper)
+        .buttonStyle(.chip())
         .foregroundStyle(ink)
     }
 
-    /// Adjust floats at the bottom of the column, as in Preview, and folds into a pill.
+    /// Adjust and the cuts of the mix float at the bottom of the column, as in Preview, and fold into a chip.
     @ViewBuilder
     private func adjustDock(_ cuts: [FontFace]) -> some View {
         if adjustOpen {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 8) {
-                    Text("Adjust")
-                        .font(.caption.weight(.semibold))
-                    Text("Shared with Preview.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Spacer(minLength: 0)
-                    Button {
-                        adjustOpen = false
-                    } label: {
-                        Image(systemName: "chevron.down")
-                            .font(.caption.weight(.semibold))
-                    }
-                    .buttonStyle(.borderless)
-                    .help("Hide Adjust")
+            ChromeDock(hideHelp: "Hide Text, Adjust, and the cuts", onHide: { adjustOpen = false }) {
+                DockSection("Text", key: "mix.text") {
+                    SampleChips(text: $text, face: cuts.first)
+                } content: {
+                    TextField("Type here", text: $text, axis: .vertical)
+                        .textFieldStyle(.plain)
+                        .font(AppChrome.type())
+                        .foregroundStyle(ink)
+                        .lineLimit(1...3)
+                        .frame(maxWidth: .infinity, alignment: .topLeading)
+                        .help("The sample text: the same one Preview, Compare, and Match show. The mix sets its letters.")
                 }
-                adjust
-                Divider()
-                UsedCutsBand(faces: cuts, title: poolTitle, note: poolNote, onRemove: { remove($0) }, embedded: true) {
-                    AddFontButton(
-                        title: "Add cut…",
-                        help: "Add a cut to the mix",
-                        onPick: { face in _ = addToPool([face.identity]) },
-                        isChosen: { face in cuts.contains { $0.id == face.id } }
-                    )
+                DockSection("Adjust", key: "mix.adjust") {
+                    UnitSegments()
+                } content: {
+                    SampleAdjustRows()
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                // The pinned cuts stand in the row at the top. Random and similar cuts are listed here.
+                if source != .chosen {
+                    DockSection(poolTitle, key: "mix.cuts", detail: "\(cuts.count)", minWidth: 220, onFonts: { addToPool($0) }) {
+                        AddFontButton(
+                            title: "Add cut",
+                            help: "Add a cut to the mix",
+                            onPick: { face in _ = addToPool([face.identity]) },
+                            isChosen: { face in cuts.contains { $0.id == face.id } },
+                            compact: true
+                        )
+                    } content: {
+                        CutStrip(
+                            faces: cuts,
+                            emptyNote: poolNote,
+                            onRemove: { remove($0) },
+                            onDrop: { addToPool($0) }
+                        )
+                        .help(poolNote)
+                    }
                 }
             }
-            .padding(8)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color(nsColor: paper), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(ink.opacity(0.18)))
-            .shadow(color: Color.black.opacity(0.14), radius: 14, y: 6)
         } else {
-            Button {
+            DockPill(title: source == .chosen ? "Text · Adjust" : "Text · Adjust · Cuts", help: "Show the sample text, Adjust, and the cuts of the mix") {
                 adjustOpen = true
-            } label: {
-                Label("Adjust", systemImage: "slider.horizontal.3")
-                    .font(.caption.weight(.semibold))
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
             }
-            .buttonStyle(.plain)
-            .foregroundStyle(ink)
-            .background(Color(nsColor: paper), in: Capsule())
-            .overlay(Capsule().stroke(ink.opacity(0.18)))
-            .shadow(color: Color.black.opacity(0.16), radius: 10, y: 4)
-            .help("Show Adjust")
-        }
-    }
-
-    /// Size, spacing, and line height, shared with the preview.
-    private var adjust: some View {
-        let displaySize = Binding<Double>(
-            get: { unit.display(from: size) },
-            set: { size = unit.points(from: $0) }
-        )
-        let step: Double = unit == .rem ? 0.05 : 1
-        let fraction = unit == .rem ? 2 : 1
-        let displayLeading = Binding<Double>(
-            get: { unit.display(from: size * leading) },
-            set: { newValue in
-                let points = unit.points(from: newValue)
-                leading = size > 0 ? min(2.4, max(0.5, points / size)) : 1.2
-            }
-        )
-        let lower = unit.display(from: size * 0.5)
-        let upper = unit.display(from: size * 2.4)
-        return VStack(alignment: .leading, spacing: 6) {
-            AdjustRow(title: "Size", value: displaySize, range: unit.display(from: 8)...unit.display(from: 240), step: step, fraction: fraction, reset: { size = 48 }) {
-                Picker("Unit", selection: $unitRaw) {
-                    ForEach(SpecimenUnit.allCases, id: \.rawValue) { unit in
-                        Text(unit.title).tag(unit.rawValue)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .controlSize(.small)
-                .frame(minWidth: 92, idealWidth: 112, maxWidth: 130)
-                .help("Unit for size and line height: points, CSS pixels, or rem")
-            }
-            AdjustRow(title: "Spacing", value: $tracking, range: -0.08...0.4, step: 0.01, fraction: 2, reset: { tracking = 0 })
-            AdjustRow(title: "Line height", value: displayLeading, range: lower...max(lower, upper), step: step, fraction: fraction, reset: { leading = 1.2 })
         }
     }
 
@@ -258,7 +203,7 @@ struct LetterMixView: View {
     private func board(_ letters: [NSRange], assigned: [Int: FontFace], cuts: [FontFace]) -> some View {
         if cuts.isEmpty {
             Text(emptyText)
-                .font(.callout)
+                .font(.uiCallout)
                 .foregroundStyle(ink.opacity(0.7))
                 .frame(maxWidth: .infinity, minHeight: 120, alignment: .leading)
         } else {
@@ -270,11 +215,11 @@ struct LetterMixView: View {
                     fonts: fonts,
                     fallback: fallback,
                     marked: markedOffsets(letters),
-                    markColor: NSColor.fontsoHex(foregroundHex, fallback: .black).withAlphaComponent(0.14),
+                    markColor: theme.ink.withAlphaComponent(0.14),
                     pointSize: size,
                     tracking: tracking * size,
                     leading: leading,
-                    textColor: NSColor.fontsoHex(foregroundHex, fallback: .black),
+                    textColor: theme.ink,
                     background: paper,
                     measuredHeight: $editorHeight,
                     onEdit: { range, length in
@@ -293,7 +238,7 @@ struct LetterMixView: View {
                 .frame(maxWidth: .infinity, minHeight: max(editorHeight, size * max(leading, 1.2) + 48), alignment: .topLeading)
                 .padding(.horizontal, -14)
                 Text("Type straight into the text. Select letters to give them a cut, or drop a font on a letter.")
-                    .font(.caption)
+                    .font(.uiCaption)
                     .foregroundStyle(ink.opacity(0.55))
             }
         }
@@ -313,7 +258,7 @@ struct LetterMixView: View {
         return VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 Text(title)
-                    .font(.headline)
+                    .font(.uiHeadline)
                     .foregroundStyle(ink)
                 if !current.isEmpty {
                     Button("Back to the shuffle") { assign(nil, to: picked) }
@@ -337,7 +282,7 @@ struct LetterMixView: View {
                             VStack(spacing: 2) {
                                 glyphs(sample, face: cut)
                                 Text(cut.family)
-                                    .font(.caption2)
+                                    .font(.uiCaption2)
                                     .lineLimit(1)
                                     .frame(maxWidth: 90)
                             }
@@ -373,16 +318,16 @@ struct LetterMixView: View {
 
     private var poolTitle: String {
         switch source {
-        case .chosen: return "Used cuts"
-        case .random: return "Used cuts · random"
-        case .similar: return "Used cuts · close to \(store.previewFace.map { "\($0.family) \($0.style)" } ?? "the reference")"
+        case .chosen: return "Pinned cuts"
+        case .random: return "Random cuts"
+        case .similar: return "Similar cuts"
         }
     }
 
     private var poolNote: String {
         switch source {
         case .chosen:
-            return "Select cuts in the library, drop them here, or add them. Each one takes part in the mix."
+            return "The pinned cuts in the row at the top. Each one takes part in the mix."
         case .random:
             return "Picked at random from what the library column shows, filters included. New cuts deals again."
         case .similar:
@@ -392,7 +337,7 @@ struct LetterMixView: View {
 
     private var emptyText: String {
         switch source {
-        case .chosen: return "Select two or more cuts in the library, or drop them here, to mix their letters."
+        case .chosen: return "Pin two or more cuts in Preview, or drop them here, to mix their letters."
         case .random: return finding ? "Picking cuts…" : "The view holds no cuts to pick from."
         case .similar:
             if store.previewFace == nil { return "Select a font in the library: the mix looks for families close to it." }
@@ -413,7 +358,7 @@ struct LetterMixView: View {
 
     private func poolFaces(_ known: [String: FontFace]) -> [FontFace] {
         switch source {
-        case .chosen: return store.previewFaces
+        case .chosen: return store.pinnedFaces
         case .random, .similar: return pool.compactMap { known[$0] }
         }
     }
@@ -440,10 +385,7 @@ struct LetterMixView: View {
     private func removeNow(_ face: FontFace) {
         switch source {
         case .chosen:
-            if store.isPinned(face) { store.togglePin(face) }
-            var shown = store.selection.contains(face.id) ? store.selection : Set(store.previewFaces.map(\.id))
-            shown.remove(face.id)
-            store.selection = shown
+            store.removeFromPreview(face)
         case .random, .similar:
             model.pool.removeAll { $0 == face.identity }
         }
@@ -618,12 +560,8 @@ struct LetterMixView: View {
         return z ^ (z >> 31)
     }
 
-    private var paper: NSColor { NSColor.fontsoHex(backgroundHex, fallback: .white) }
-    private var ink: Color { Color(nsColor: NSColor.fontsoHex(foregroundHex, fallback: .black)) }
-    private var paperIsDark: Bool {
-        guard let rgb = paper.usingColorSpace(.sRGB) else { return false }
-        return (0.299 * rgb.redComponent + 0.587 * rgb.greenComponent + 0.114 * rgb.blueComponent) < 0.5
-    }
+    private var paper: NSColor { theme.paper }
+    private var ink: Color { Color(nsColor: theme.ink) }
 }
 
 /// What Mix holds besides its text, kept in a class so Undo can step back through it.
@@ -651,7 +589,7 @@ final class MixModel: ObservableObject {
     }
 
     /// The Mix settings stored in the defaults that Undo also steps back.
-    private static let settingKeys = ["fontso.mix.source", "fontso.mix.count", "fontso.mix.order", "fontso.mix.sameLetter"]
+    private static let settingKeys = ["fontso.mix.cuts", "fontso.mix.count", "fontso.mix.order", "fontso.mix.sameLetter"]
 
     var snapshot: Snapshot {
         var settings: [String: Any] = [:]
@@ -695,9 +633,17 @@ enum MixSource: String, CaseIterable, Identifiable {
     var id: String { rawValue }
     var title: String {
         switch self {
-        case .chosen: return "Chosen"
+        case .chosen: return "Pinned cuts"
         case .random: return "Random"
         case .similar: return "Similar"
+        }
+    }
+
+    var help: String {
+        switch self {
+        case .chosen: return "Mix the pinned cuts"
+        case .random: return "Mix cuts picked at random from the library view"
+        case .similar: return "Mix cuts close to the selected font in x-height and letter width"
         }
     }
 }
@@ -709,6 +655,13 @@ enum MixOrder: String, CaseIterable, Identifiable {
         switch self {
         case .random: return "Shuffled"
         case .inTurn: return "In turn"
+        }
+    }
+
+    var help: String {
+        switch self {
+        case .random: return "Letters take a cut at random"
+        case .inTurn: return "Letters take the cuts one after another"
         }
     }
 }

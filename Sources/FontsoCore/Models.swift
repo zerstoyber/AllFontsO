@@ -292,6 +292,18 @@ public enum FaceKey {
     }
 }
 
+/// One license of a cut: the project it was bought for, and until when it runs.
+public struct LicenseRecord: Sendable, Equatable {
+    public var project: String
+    /// Seconds since 1970. Zero for a license with no end date.
+    public var validUntil: Double
+
+    public init(project: String, validUntil: Double) {
+        self.project = project
+        self.validUntil = validUntil
+    }
+}
+
 public struct FontGroup: Identifiable, Hashable, Sendable {
     public var id: Int64
     public var name: String
@@ -364,5 +376,97 @@ public func normalizeFontPath(_ path: String) -> String {
 public extension String {
     var cleanedFontName: String {
         trimmingCharacters(in: .whitespacesAndNewlines.union(.controlCharacters))
+    }
+}
+
+/// The order of the pinned fonts: where a moved font lands, and the orders they can be sorted into.
+public enum PinOrder {
+    public enum Key: String, CaseIterable, Sendable {
+        case name
+        case weight
+        case width
+        case category
+
+        public var title: String {
+            switch self {
+            case .name: return "Name"
+            case .weight: return "Weight, light to bold"
+            case .width: return "Width, narrow to wide"
+            case .category: return "Category"
+            }
+        }
+    }
+
+    /// Puts `moved` in front of `target`, each taken from where it stood; fonts that were not in the order join it.
+    /// Without a target they go to the end. A target that is itself moved keeps the place it had.
+    public static func place(_ moved: [String], before target: String?, in order: [String]) -> [String] {
+        var seen = Set<String>()
+        let moved = moved.filter { seen.insert($0).inserted }
+        guard !moved.isEmpty else { return order }
+        var rest = order.filter { !seen.contains($0) }
+        var index = rest.count
+        if let target {
+            if let at = rest.firstIndex(of: target) {
+                index = at
+            } else if let stood = order.firstIndex(of: target) {
+                index = order[..<stood].filter { !seen.contains($0) }.count
+            }
+        }
+        rest.insert(contentsOf: moved, at: index)
+        return rest
+    }
+
+    /// Moves one font by places to the left (negative) or right, stopping at the ends.
+    public static func step(_ identity: String, by offset: Int, in order: [String]) -> [String] {
+        guard let from = order.firstIndex(of: identity) else { return order }
+        let to = min(max(from + offset, 0), order.count - 1)
+        guard to != from else { return order }
+        var result = order
+        result.remove(at: from)
+        result.insert(identity, at: to)
+        return result
+    }
+
+    /// The weight a cut is sorted by. Many files carry 400 whatever the cut is; then the style name decides.
+    public static func weight(of face: FontFace) -> Int {
+        guard face.weightClass == 400 || face.weightClass == 0 else { return face.weightClass }
+        let style = face.style.lowercased().filter { $0.isLetter }
+        let words: [(String, Int)] = [
+            ("extralight", 200), ("ultralight", 200), ("thin", 100), ("hairline", 100),
+            ("semibold", 600), ("demibold", 600), ("extrabold", 800), ("ultrabold", 800),
+            ("light", 300), ("medium", 500), ("bold", 700), ("black", 900), ("heavy", 900),
+            ("demi", 600), ("book", 350),
+        ]
+        return words.first { style.contains($0.0) }?.1 ?? 400
+    }
+
+    /// The fonts in a sorted order. Cuts of one family stay together, upright before italic, light before bold.
+    public static func sorted(_ faces: [FontFace], by key: Key) -> [FontFace] {
+        var weights: [String: Int] = [:]
+        for face in faces { weights[face.identity] = weight(of: face) }
+        func heft(_ face: FontFace) -> Int { weights[face.identity] ?? face.weightClass }
+        func byName(_ lhs: FontFace, _ rhs: FontFace) -> Bool {
+            let families = lhs.family.localizedStandardCompare(rhs.family)
+            if families != .orderedSame { return families == .orderedAscending }
+            if lhs.widthClass != rhs.widthClass { return lhs.widthClass < rhs.widthClass }
+            if heft(lhs) != heft(rhs) { return heft(lhs) < heft(rhs) }
+            if lhs.isItalic != rhs.isItalic { return !lhs.isItalic }
+            return lhs.style.localizedStandardCompare(rhs.style) == .orderedAscending
+        }
+        return faces.sorted { lhs, rhs in
+            switch key {
+            case .name:
+                return byName(lhs, rhs)
+            case .weight:
+                if heft(lhs) != heft(rhs) { return heft(lhs) < heft(rhs) }
+                return byName(lhs, rhs)
+            case .width:
+                if lhs.widthClass != rhs.widthClass { return lhs.widthClass < rhs.widthClass }
+                return byName(lhs, rhs)
+            case .category:
+                if lhs.category != rhs.category { return lhs.category.sortIndex < rhs.category.sortIndex }
+                return byName(lhs, rhs)
+            }
+        }
     }
 }

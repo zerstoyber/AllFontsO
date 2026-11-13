@@ -352,41 +352,67 @@ public final class FontDatabase: @unchecked Sendable {
         }
     }
 
-    /// Which project each cut is licensed for, keyed by face identity.
-    public func allLicenses() throws -> [String: String] {
+    /// The licenses of every cut, keyed by face identity, in the order they were entered. A cut can be licensed
+    /// for several projects, each with its own end date.
+    public func allLicenseRecords() throws -> [String: [LicenseRecord]] {
         try queue.sync {
-            let rows = try query("SELECT file_path, face_index, project FROM licenses;") { statement in
-                (FaceKey.make(path: columnText(statement, 0), index: Int(sqlite3_column_int(statement, 1))), columnText(statement, 2))
+            let rows = try query("SELECT file_path, face_index, project, valid_until FROM licenses ORDER BY rowid;") { statement in
+                (
+                    FaceKey.make(path: columnText(statement, 0), index: Int(sqlite3_column_int(statement, 1))),
+                    LicenseRecord(project: columnText(statement, 2), validUntil: sqlite3_column_double(statement, 3))
+                )
             }
-            return Dictionary(uniqueKeysWithValues: rows)
+            var result: [String: [LicenseRecord]] = [:]
+            for (key, record) in rows { result[key, default: []].append(record) }
+            return result
         }
     }
 
-    /// Records the project a cut is licensed for. An empty project removes the record.
-    public func setLicense(filePath: String, faceIndex: Int, project: String) throws {
+    /// Records a project a cut is licensed for, beside the ones it already has. A project it has stays as it is.
+    public func addLicense(filePath: String, faceIndex: Int, project: String) throws {
+        guard !project.isEmpty else { return }
         try queue.sync {
-            if project.isEmpty {
-                try run(
-                    "DELETE FROM licenses WHERE file_path = ? AND face_index = ?;",
-                    bindings: { statement in
-                        bind(statement, 1, filePath)
-                        sqlite3_bind_int(statement, 2, Int32(faceIndex))
-                    }
-                )
-            } else {
-                try run(
-                    """
-                    INSERT INTO licenses (file_path, face_index, project, updated_at) VALUES (?, ?, ?, ?)
-                    ON CONFLICT(file_path, face_index) DO UPDATE SET project = excluded.project, updated_at = excluded.updated_at;
-                    """,
-                    bindings: { statement in
-                        bind(statement, 1, filePath)
-                        sqlite3_bind_int(statement, 2, Int32(faceIndex))
-                        bind(statement, 3, project)
-                        sqlite3_bind_double(statement, 4, Date().timeIntervalSince1970)
-                    }
-                )
-            }
+            try run(
+                "INSERT OR IGNORE INTO licenses (file_path, face_index, project, updated_at, valid_until) VALUES (?, ?, ?, ?, 0);",
+                bindings: { statement in
+                    bind(statement, 1, filePath)
+                    sqlite3_bind_int(statement, 2, Int32(faceIndex))
+                    bind(statement, 3, project)
+                    sqlite3_bind_double(statement, 4, Date().timeIntervalSince1970)
+                }
+            )
+        }
+    }
+
+    /// Takes the license for one project away from a cut. Without a project, every license of the cut goes.
+    public func removeLicense(filePath: String, faceIndex: Int, project: String? = nil) throws {
+        try queue.sync {
+            try run(
+                project == nil
+                    ? "DELETE FROM licenses WHERE file_path = ? AND face_index = ?;"
+                    : "DELETE FROM licenses WHERE file_path = ? AND face_index = ? AND project = ?;",
+                bindings: { statement in
+                    bind(statement, 1, filePath)
+                    sqlite3_bind_int(statement, 2, Int32(faceIndex))
+                    if let project { bind(statement, 3, project) }
+                }
+            )
+        }
+    }
+
+    /// Records until when a cut's license for one project runs. Zero means it has no end date.
+    public func setLicenseEnd(filePath: String, faceIndex: Int, project: String, until: Double) throws {
+        try queue.sync {
+            try run(
+                "UPDATE licenses SET valid_until = ?, updated_at = ? WHERE file_path = ? AND face_index = ? AND project = ?;",
+                bindings: { statement in
+                    sqlite3_bind_double(statement, 1, max(0, until))
+                    sqlite3_bind_double(statement, 2, Date().timeIntervalSince1970)
+                    bind(statement, 3, filePath)
+                    sqlite3_bind_int(statement, 4, Int32(faceIndex))
+                    bind(statement, 5, project)
+                }
+            )
         }
     }
 
@@ -1268,45 +1294,112 @@ public final class FontDatabase: @unchecked Sendable {
         }
     }
 
-    public func syncFoundryNotices(host: String, drafts: [FoundryNoticeDraft]) throws {
+    /// Brings the notices of one foundry in line with what its site shows now. A name that is still there keeps
+    /// the day it was first found, so only what is really new counts as new; a name the site dropped goes, unless
+    /// it was marked, removed, or corrected by hand.
+    /// With `known`, names this read finds for the first time go in as seen: they are the foundry's catalogue, read
+    /// more closely than before, and no news.
+    public func syncFoundryNotices(host: String, drafts: [FoundryNoticeDraft], known catalogue: Bool = false) throws {
         let now = Date().timeIntervalSince1970
+        func key(_ name: String) -> String { name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+        // Lines about fonts are no typefaces: they are not taken in, and the ones stored by earlier reads go.
+        let drafts = drafts.filter { FoundryLookup.isTypefaceName($0.name) }
+        let current = Set(drafts.map { key($0.name) })
         try queue.sync {
             try exec("BEGIN;")
             do {
-                try run(
-                    "DELETE FROM foundry_notices WHERE foundry_host = ? AND seen = 0 AND dismissed = 0 AND edited = 0;",
-                    bindings: { bind($0, 1, host) }
+                struct Row {
+                    var id: Int64
+                    var name: String
+                    var url: String
+                    var kept: Bool
+                    var edited: Bool
+                }
+                let rows = try query(
+                    "SELECT id, name, url, seen, dismissed, edited FROM foundry_notices WHERE foundry_host = ?;",
+                    bindings: { self.bind($0, 1, host) },
+                    map: { statement in
+                        Row(
+                            id: sqlite3_column_int64(statement, 0),
+                            name: self.columnText(statement, 1),
+                            url: self.columnText(statement, 2),
+                            kept: sqlite3_column_int(statement, 3) != 0 || sqlite3_column_int(statement, 4) != 0,
+                            edited: sqlite3_column_int(statement, 5) != 0
+                        )
+                    }
                 )
+                var known: [String: Row] = [:]
+                for row in rows {
+                    let gone = !current.contains(key(row.name))
+                    if !row.edited, gone, !row.kept || !FoundryLookup.isTypefaceName(row.name) {
+                        try run(
+                            "DELETE FROM foundry_notices WHERE id = ?;",
+                            bindings: { sqlite3_bind_int64($0, 1, row.id) }
+                        )
+                    } else if known[key(row.name)] == nil {
+                        known[key(row.name)] = row
+                    }
+                }
                 for draft in drafts {
                     let trimmed = draft.name.trimmingCharacters(in: .whitespacesAndNewlines)
                     guard trimmed.count >= 2 else { continue }
                     let published = draft.publishedAt?.timeIntervalSince1970 ?? 0
-                    // A link the user corrected by hand stays; the foundry's own link only fills in untouched rows.
+                    if let row = known[key(trimmed)] {
+                        // A link corrected by hand stays, and so does the page of a font once it is known: the
+                        // foundry's front page does not take its place.
+                        let old = URL(string: row.url)
+                        let keepsPage = draft.url.path.count <= 1 && (old?.path.count ?? 0) > 1
+                        let address = row.edited || keepsPage ? row.url : draft.url.absoluteString
+                        try run(
+                            """
+                            UPDATE foundry_notices SET url = ?,
+                                published_at = CASE WHEN ? > 0 THEN ? ELSE published_at END
+                            WHERE id = ?;
+                            """,
+                            bindings: { statement in
+                                bind(statement, 1, address)
+                                sqlite3_bind_double(statement, 2, published)
+                                sqlite3_bind_double(statement, 3, published)
+                                sqlite3_bind_int64(statement, 4, row.id)
+                            }
+                        )
+                        continue
+                    }
                     try run(
                         """
-                        INSERT INTO foundry_notices (foundry_host, name, url, published_at, seen, dismissed, discovered_at)
-                        VALUES (?, ?, ?, ?, 0, 0, ?)
-                        ON CONFLICT(foundry_host, name) DO UPDATE SET
-                            url = CASE WHEN foundry_notices.edited = 1 THEN foundry_notices.url ELSE excluded.url END,
-                            published_at = CASE
-                                WHEN excluded.published_at > 0 THEN excluded.published_at
-                                ELSE foundry_notices.published_at
-                            END;
+                        INSERT OR IGNORE INTO foundry_notices (foundry_host, name, url, published_at, seen, dismissed, discovered_at)
+                        VALUES (?, ?, ?, ?, ?, 0, ?);
                         """,
                         bindings: { statement in
                             bind(statement, 1, host)
                             bind(statement, 2, trimmed)
                             bind(statement, 3, draft.url.absoluteString)
                             sqlite3_bind_double(statement, 4, published)
-                            sqlite3_bind_double(statement, 5, now)
+                            sqlite3_bind_int(statement, 5, catalogue ? 1 : 0)
+                            sqlite3_bind_double(statement, 6, now)
                         }
                     )
+                    known[key(trimmed)] = Row(id: 0, name: trimmed, url: draft.url.absoluteString, kept: false, edited: true)
                 }
                 try exec("COMMIT;")
             } catch {
                 try? exec("ROLLBACK;")
                 throw error
             }
+        }
+    }
+
+    /// The page found for a notice that only had the foundry's front page. It is no correction by hand, so the
+    /// foundry's own link may still replace it.
+    public func setNoticePage(id: Int64, url: URL) throws {
+        try queue.sync {
+            try run(
+                "UPDATE foundry_notices SET url = ? WHERE id = ? AND edited = 0;",
+                bindings: { statement in
+                    bind(statement, 1, url.absoluteString)
+                    sqlite3_bind_int64(statement, 2, id)
+                }
+            )
         }
     }
 
@@ -1508,7 +1601,8 @@ public final class FontDatabase: @unchecked Sendable {
                 face_index INTEGER NOT NULL,
                 project TEXT NOT NULL,
                 updated_at REAL NOT NULL,
-                PRIMARY KEY (file_path, face_index)
+                valid_until REAL NOT NULL DEFAULT 0,
+                PRIMARY KEY (file_path, face_index, project)
             );
             """
         )
@@ -1606,6 +1700,45 @@ public final class FontDatabase: @unchecked Sendable {
             );
             """
         )
+        let licenseColumns = try query("PRAGMA table_info(licenses);") { statement in
+            columnText(statement, 1)
+        }
+        if !licenseColumns.contains("valid_until") {
+            try exec("ALTER TABLE licenses ADD COLUMN valid_until REAL NOT NULL DEFAULT 0;")
+        }
+        // A cut used to carry one license. The table is rebuilt once, so it can carry one for each project.
+        let licenseKey = try query("PRAGMA table_info(licenses);") { statement in
+            (columnText(statement, 1), Int(sqlite3_column_int(statement, 5)))
+        }
+        if licenseKey.contains(where: { $0.0 == "project" && $0.1 == 0 }) {
+            try exec("BEGIN IMMEDIATE;")
+            do {
+                try exec(
+                    """
+                    CREATE TABLE licenses_by_project (
+                        file_path TEXT NOT NULL,
+                        face_index INTEGER NOT NULL,
+                        project TEXT NOT NULL,
+                        updated_at REAL NOT NULL,
+                        valid_until REAL NOT NULL DEFAULT 0,
+                        PRIMARY KEY (file_path, face_index, project)
+                    );
+                    """
+                )
+                try exec(
+                    """
+                    INSERT INTO licenses_by_project (file_path, face_index, project, updated_at, valid_until)
+                    SELECT file_path, face_index, project, updated_at, valid_until FROM licenses ORDER BY rowid;
+                    """
+                )
+                try exec("DROP TABLE licenses;")
+                try exec("ALTER TABLE licenses_by_project RENAME TO licenses;")
+                try exec("COMMIT;")
+            } catch {
+                try? exec("ROLLBACK;")
+                throw error
+            }
+        }
         let messageColumns = try query("PRAGMA table_info(research_messages);") { statement in
             columnText(statement, 1)
         }

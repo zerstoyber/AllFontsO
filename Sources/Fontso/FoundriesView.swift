@@ -13,7 +13,7 @@ struct FoundriesView: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Text("Foundries")
-                    .font(.title2.weight(.semibold))
+                    .font(.uiTitle2.weight(.semibold))
                 Spacer()
                 Button("Update index") { store.indexFoundries() }
                     .disabled(store.isIndexingFoundries)
@@ -23,7 +23,7 @@ struct FoundriesView: View {
                     .help("Close the foundries")
             }
             Text("The index is the full list from typefoundries.info and the Type Foundry Directory. Star a foundry to follow it, or add one of your own. New names from followed foundries show up in News.")
-                .font(.callout)
+                .font(.uiCallout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             if store.isIndexingFoundries {
@@ -34,7 +34,7 @@ struct FoundriesView: View {
                 }
             } else if !store.foundryIndexNote.isEmpty {
                 Text(store.foundryIndexNote)
-                    .font(.caption)
+                    .font(.uiCaption)
                     .foregroundStyle(.secondary)
             }
             TextField("Find a foundry", text: $query)
@@ -69,13 +69,13 @@ struct FoundriesView: View {
                         Text(foundry.name)
                             .lineLimit(1)
                         Text(foundryCaption(foundry))
-                            .font(.caption)
+                            .font(.uiCaption)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                     }
                     Spacer(minLength: 8)
                     Button("Open") { NSWorkspace.shared.open(foundry.url) }
-                        .buttonStyle(.borderless)
+                        .buttonStyle(.paper)
                         .help("Open the foundry’s website")
                 }
             }
@@ -120,9 +120,19 @@ enum FoundryFetch {
         return html
     }
 
+    /// Whether a page is there: the site answers with the page itself, not with an error or its front page.
+    static func exists(_ url: URL, timeout: TimeInterval = 8) async -> Bool {
+        var request = URLRequest(url: FoundryLookup.secure(url), timeoutInterval: timeout)
+        request.setValue("AllFontsO", forHTTPHeaderField: "User-Agent")
+        guard let (_, response) = try? await URLSession.shared.data(for: request),
+              let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else { return false }
+        return (http.url?.path.count ?? 0) > 1
+    }
+
+    /// Reads a page over https; macOS refuses plain http, and nearly every foundry answers on https.
     static func text(_ url: URL?, timeout: TimeInterval = 20) async -> String? {
         guard let url else { return nil }
-        var request = URLRequest(url: url, timeoutInterval: timeout)
+        var request = URLRequest(url: FoundryLookup.secure(url), timeoutInterval: timeout)
         request.setValue("AllFontsO", forHTTPHeaderField: "User-Agent")
         do {
             let (data, response) = try await URLSession.shared.data(for: request)

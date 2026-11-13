@@ -26,7 +26,7 @@ enum MCPSettings {
         Bundle.main.executableURL?.path ?? CommandLine.arguments.first ?? "Fontso"
     }
 
-    /// Configuration for programs that launch MCP servers over stdio, such as Claude Desktop or Cursor.
+    /// Configuration for programs that launch MCP servers themselves, such as Claude Desktop.
     static func stdioConfiguration() -> String {
         let path = executablePath.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
         return """
@@ -192,7 +192,7 @@ final class MCPServer {
 /// JSON-RPC methods and the tools AllFontsO offers.
 @MainActor
 enum MCPTools {
-    static let protocolVersion = "2025-06-18"
+    nonisolated static let protocolVersion = "2025-06-18"
 
     static func handle(_ message: [String: Any], store: LibraryStore) async -> [String: Any]? {
         let method = message["method"] as? String ?? ""
@@ -203,12 +203,7 @@ enum MCPTools {
         }
         switch method {
         case "initialize":
-            return envelope(id: id, result: [
-                "protocolVersion": protocolVersion,
-                "capabilities": ["tools": ["listChanged": false]],
-                "serverInfo": ["name": "AllFontsO", "version": "1.0"],
-                "instructions": "AllFontsO is the user's font manager on this Mac. Search the library before naming a font. Activation and lists change the user's system, so do only what they asked."
-            ])
+            return envelope(id: id, result: initializeResult(params))
         case "ping":
             return envelope(id: id, result: [:])
         case "tools/list":
@@ -237,7 +232,47 @@ enum MCPTools {
         }
     }
 
-    static func toolDescriptions() -> [[String: Any]] {
+    /// The answer to initialize. The program's own protocol version is taken when it is one AllFontsO speaks, so
+    /// older and newer programs both connect.
+    nonisolated static func initializeResult(_ params: [String: Any]) -> [String: Any] {
+        let asked = params["protocolVersion"] as? String ?? ""
+        let spoken = ["2024-11-05", "2025-03-26", "2025-06-18"]
+        return [
+            "protocolVersion": spoken.contains(asked) ? asked : protocolVersion,
+            "capabilities": ["tools": ["listChanged": false]],
+            "serverInfo": ["name": "AllFontsO", "version": AppChrome.version],
+            "instructions": "AllFontsO is the user's font manager on this Mac. Search the library before naming a font. Activation and lists change the user's system, so do only what they asked."
+        ]
+    }
+
+    /// What the stdio bridge answers by itself while AllFontsO is closed or MCP is off. A program such as Claude
+    /// Desktop starts the bridge when it launches, often before AllFontsO is open: it still connects and sees the
+    /// tools, and a tool says what to do until AllFontsO is there.
+    nonisolated static func offlineReply(_ message: [String: Any]) -> [String: Any]? {
+        guard let id = message["id"] else { return nil }
+        let params = message["params"] as? [String: Any] ?? [:]
+        switch message["method"] as? String ?? "" {
+        case "initialize":
+            return envelope(id: id, result: initializeResult(params))
+        case "ping":
+            return envelope(id: id, result: [:])
+        case "tools/list":
+            return envelope(id: id, result: ["tools": toolDescriptions()])
+        case "resources/list":
+            return envelope(id: id, result: ["resources": []])
+        case "prompts/list":
+            return envelope(id: id, result: ["prompts": []])
+        case "tools/call":
+            return envelope(id: id, result: [
+                "content": [["type": "text", "text": "AllFontsO is not answering. Ask the user to open AllFontsO and, under Chat › Model, choose Your own AI; then try again."]],
+                "isError": true
+            ])
+        default:
+            return errorObject(id: id, code: -32601, message: "Unknown method.")
+        }
+    }
+
+    nonisolated static func toolDescriptions() -> [[String: Any]] {
         [
             tool(
                 "search_fonts",
@@ -502,7 +537,7 @@ enum MCPTools {
         return faces
     }
 
-    private static func tool(_ name: String, _ description: String, properties: [String: Any], required: [String]) -> [String: Any] {
+    private nonisolated static func tool(_ name: String, _ description: String, properties: [String: Any], required: [String]) -> [String: Any] {
         [
             "name": name,
             "description": description,
@@ -523,11 +558,11 @@ enum MCPTools {
         return min(max(raw, 1), top)
     }
 
-    private static func envelope(id: Any?, result: [String: Any]) -> [String: Any] {
+    private nonisolated static func envelope(id: Any?, result: [String: Any]) -> [String: Any] {
         ["jsonrpc": "2.0", "id": id ?? NSNull(), "result": result]
     }
 
-    private static func errorObject(id: Any?, code: Int, message: String) -> [String: Any] {
+    private nonisolated static func errorObject(id: Any?, code: Int, message: String) -> [String: Any] {
         ["jsonrpc": "2.0", "id": id ?? NSNull(), "error": ["code": code, "message": message]]
     }
 
@@ -610,12 +645,16 @@ enum MCPStdioBridge {
                 isNotification = false
             }
             guard let reply = forward(data) else {
-                if !isNotification {
-                    let id = (object as? [String: Any])?["id"]
+                // AllFontsO is closed or MCP is off: the bridge answers what it can by itself.
+                if !isNotification, let message = object as? [String: Any],
+                   let offline = MCPTools.offlineReply(message),
+                   let body = try? JSONSerialization.data(withJSONObject: offline) {
+                    write(body, to: output)
+                } else if !isNotification {
                     write(MCPTools.errorEnvelope(
-                        id: id,
+                        id: nil,
                         code: -32000,
-                        message: "AllFontsO is not running, or MCP is switched off in Research › Model."
+                        message: "AllFontsO is not running, or Your own AI is switched off under Chat › Model."
                     ), to: output)
                 }
                 continue

@@ -6,6 +6,8 @@ import UniformTypeIdentifiers
 extension Notification.Name {
     /// Asks the open Playground to export its page; the object is "pdf" or "png".
     static let fontsoPlaygroundExport = Notification.Name("fontso.playgroundExport")
+    /// The three dots of the pinned fonts in Shape › Mix: the mix on show becomes a block in the Playground.
+    static let fontsoMixToPlayground = Notification.Name("fontso.mixToPlayground")
 }
 
 /// One text block in the Playground: its own font, size, tracking, leading, and padding.
@@ -220,10 +222,13 @@ final class PlaygroundDocument: ObservableObject {
 struct PlaygroundView: View {
     @Environment(LibraryStore.self) private var store
     @ObservedObject private var document = PlaygroundDocument.shared
-    @AppStorage("fontso.specimen.background") private var backgroundHex = "F6F3EE"
-    @AppStorage("fontso.specimen.foreground") private var foregroundHex = "212121"
+    @ObservedObject private var theme = PaperSettings.shared
+    @AppStorage("fontso.playground.dockOpen") private var dockOpen = true
+    /// The pinned fonts large across the dock. Preview and Playground share the choice.
+    @AppStorage("fontso.pinned.large.dock") private var dockPinnedLarge = false
+    /// The block the dock adjusts: the one last clicked into.
+    @State private var activeBlock: UUID?
     @State private var heights: [UUID: CGFloat] = [:]
-    @State private var hovered: UUID?
     @State private var settingsFor: UUID?
     @State private var pageWidth: CGFloat = 600
     @State private var exportOpen = false
@@ -238,26 +243,125 @@ struct PlaygroundView: View {
     var body: some View {
         ZStack(alignment: .bottom) {
             page
-            // Floats over the page like Adjust in the other modes.
-            HStack(spacing: 0) {
-                Spacer(minLength: 10)
-                UsedCutsBand(
-                    faces: usedFaces,
-                    note: "Every cut on the page, whole blocks and single letters.",
-                    embedded: true
-                )
-                .padding(10)
-                .background(Color(nsColor: paper), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(ink.opacity(0.18)))
-                .shadow(color: Color.black.opacity(0.14), radius: 14, y: 6)
-                .frame(maxWidth: 720)
-                Spacer(minLength: 10)
+            // Floats over the page like the dock in the other modes.
+            Group {
+                if dockOpen {
+                    dock
+                } else {
+                    DockPill(title: "Adjust · Padding · Cuts", help: "Show Adjust, Padding, and the cuts on the page") {
+                        dockOpen = true
+                    }
+                }
             }
+            .padding(.horizontal, AppChrome.dockInset)
             .padding(.bottom, 12)
-            .environment(\.colorScheme, paperIsDark ? .dark : .light)
             .reportOverlayHeight()
         }
         .onPreferenceChange(OverlayHeightKey.self) { dockHeight = $0 }
+        // A font dropped beside the blocks becomes a new block; dropped on a block it sets that block's font.
+        .dropDestination(for: FontDragItem.self) { items, _ in
+            let valid = items.flatMap(\.identities).filter { store.hasFace(identity: $0) }
+            guard !valid.isEmpty else { return false }
+            store.addToPlayground(valid)
+            return true
+        }
+        // A new font for the block the cursor is in shows in Info straight away.
+        .onChange(of: activeFont) { old, new in
+            guard let old, let new, old.block == new.block, old.font != new.font,
+                  let block = document.blocks.first(where: { $0.id == new.block }) else { return }
+            showInfo(block)
+        }
+    }
+
+    private struct ActiveFont: Equatable {
+        var block: UUID
+        var font: String
+    }
+
+    /// The block clicked into and the font it is set in.
+    private var activeFont: ActiveFont? {
+        guard let activeBlock, let block = document.blocks.first(where: { $0.id == activeBlock }) else { return nil }
+        return ActiveFont(block: block.id, font: block.fontIdentity)
+    }
+
+    /// The index of the block the dock adjusts: the one clicked. A page with a single block needs no click.
+    private var activeIndex: Int? {
+        if let activeBlock, let index = document.blocks.firstIndex(where: { $0.id == activeBlock }) { return index }
+        return document.blocks.count == 1 ? 0 : nil
+    }
+
+    /// Info under the navigation follows the Playground: the cut of the block the cursor is in, or of the letter
+    /// right at the cursor when the block mixes cuts.
+    private func showInfo(_ block: PlaygroundBlock, at location: Int? = nil) {
+        var identity = block.fontIdentity
+        if let location, block.isMix {
+            let length = (block.text as NSString).length
+            let offset = min(max(location, 0), max(length - 1, 0))
+            identity = block.letterFonts[offset] ?? block.fontIdentity
+        }
+        guard let face = face(for: identity), store.selection != [face.id] else { return }
+        store.selection = [face.id]
+        store.outsideSelection = []
+    }
+
+    /// A binding that finds its block by id, so it stays valid while blocks are moved or removed.
+    private func blockBinding(_ block: PlaygroundBlock) -> Binding<PlaygroundBlock> {
+        let id = block.id
+        return Binding(
+            get: { document.blocks.first { $0.id == id } ?? block },
+            set: { value in
+                if let index = document.blocks.firstIndex(where: { $0.id == id }) {
+                    document.blocks[index] = value
+                }
+            }
+        )
+    }
+
+    /// Adjust and Padding for the block last clicked into, then the cuts on the page and the pinned fonts.
+    private var dock: some View {
+        let used = usedFaces
+        let pinnedNote = "Pin fonts in Preview, then drag them from here onto a block or a letter."
+        return ChromeDock(
+            hideHelp: "Hide Adjust, Padding, and the cuts",
+            onHide: { dockOpen = false },
+            above: dockPinnedLarge ? AnyView(DockPinnedBoard(large: $dockPinnedLarge, emptyNote: pinnedNote)) : nil
+        ) {
+            if let index = activeIndex {
+                let block = blockBinding(document.blocks[index])
+                DockSection("Adjust", key: "playground.adjust", detail: blockTitle(block.wrappedValue, face: face(for: block.wrappedValue.fontIdentity))) {
+                    UnitSegments()
+                } content: {
+                    adjustRows(block)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                DockSection("Padding", key: "playground.padding", startsOpen: false) {
+                    paddingRows(block)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            } else {
+                DockSection("Adjust", key: "playground.adjust") {
+                    Text("Click a block to adjust its size, tracking, leading, and padding.")
+                        .font(AppChrome.small)
+                        .foregroundStyle(ink.opacity(0.5))
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            DockSection("Used cuts", key: "playground.used", detail: "\(used.count)", minWidth: 200) {
+                CutStrip(
+                    faces: used,
+                    emptyNote: "Every cut on the page shows here, whole blocks and single letters."
+                )
+            }
+            if !dockPinnedLarge {
+                DockSection("Pinned", key: "playground.pinned", detail: "\(store.pinnedFaces.count)", minWidth: 200, startsOpen: false, onFonts: { store.addToPreview($0) }) {
+                    PinnedSizeChip(large: $dockPinnedLarge)
+                    PinnedMenu()
+                } content: {
+                    PinnedStrip(emptyNote: pinnedNote)
+                }
+            }
+        }
     }
 
     private var page: some View {
@@ -279,9 +383,10 @@ struct PlaygroundView: View {
                         .onChange(of: proxy.size.width) { _, value in pageWidth = value }
                 }
             )
+            // A click beside the blocks lets go of the chosen one.
+            .contentShape(Rectangle())
+            .onTapGesture { activeBlock = nil }
         }
-        .background(Color(nsColor: paper))
-        .environment(\.colorScheme, paperIsDark ? .dark : .light)
         .onReceive(NotificationCenter.default.publisher(for: .fontsoPlaygroundExport)) { _ in
             exportOpen = true
         }
@@ -299,7 +404,10 @@ struct PlaygroundView: View {
     private func blockView(_ block: Binding<PlaygroundBlock>) -> some View {
         let value = block.wrappedValue
         let face = face(for: value.fontIdentity)
-        let showsTools = hovered == value.id || settingsFor == value.id
+        // A block is chosen by a click, not by the pointer passing over it: only then do its tools show and the
+        // strip at the bottom adjusts it.
+        let showsTools = activeBlock == value.id || settingsFor == value.id
+        let isActive = document.blocks.count > 1 && activeBlock == value.id
         return Group {
             if let face {
                 // Every block can give single letters a cut of their own; without any, it is set in one font.
@@ -317,7 +425,18 @@ struct PlaygroundView: View {
                     onEdit: { range, length in
                         block.wrappedValue.shiftLetters(replacing: range, with: length)
                     },
-                    onSelect: { selections[value.id] = $0 },
+                    onSelect: { range in
+                        selections[value.id] = range
+                        // In the chosen block, Info shows the cut under the cursor.
+                        if activeBlock == value.id {
+                            showInfo(block.wrappedValue, at: range.location)
+                        }
+                    },
+                    // A click into a block makes it the one with the tools, the one the strip at the bottom adjusts.
+                    onClick: {
+                        activeBlock = value.id
+                        showInfo(block.wrappedValue)
+                    },
                     onDropFont: { identities, offset in
                         guard let identity = identities.first(where: store.hasFace(identity:)) else { return }
                         let selected = selectedLetters(block.wrappedValue)
@@ -341,8 +460,8 @@ struct PlaygroundView: View {
                 )
                 .frame(maxWidth: .infinity, minHeight: max(heights[value.id] ?? 100, value.size * max(value.leading, 1.2) + 48), alignment: .topLeading)
             } else {
-                Text(value.fontIdentity.isEmpty ? "Drop a font here, or pick one from the menu." : "This font left the library. Pick another one.")
-                    .font(.callout)
+                Text(value.fontIdentity.isEmpty ? "Drop a font here, or click and pick one." : "This font left the library. Pick another one.")
+                    .font(.uiCallout)
                     .foregroundStyle(ink.opacity(0.5))
                     .frame(maxWidth: .infinity, minHeight: 72, alignment: .leading)
                     .padding(.horizontal, 14)
@@ -356,6 +475,12 @@ struct PlaygroundView: View {
         }
         .padding(value.insets)
         .frame(maxWidth: .infinity, alignment: .topLeading)
+        // The padding around the text and a block without a font take the click too.
+        .contentShape(Rectangle())
+        .onTapGesture {
+            activeBlock = value.id
+            showInfo(value)
+        }
         .overlay(alignment: .topTrailing) {
             if showsTools {
                 tools(block, face: face)
@@ -370,14 +495,17 @@ struct PlaygroundView: View {
                     .allowsHitTesting(false)
             }
         }
-        .animation(.easeOut(duration: 0.12), value: showsTools)
-        .onHover { inside in
-            if inside {
-                hovered = value.id
-            } else if hovered == value.id {
-                hovered = nil
+        .overlay(alignment: .leading) {
+            // A short bar marks the block the strip at the bottom adjusts.
+            if isActive {
+                Rectangle()
+                    .fill(ink.opacity(0.45))
+                    .frame(width: 2)
+                    .padding(.vertical, 6)
+                    .allowsHitTesting(false)
             }
         }
+        .animation(.easeOut(duration: 0.12), value: showsTools)
         .dropDestination(for: FontDragItem.self) { items, _ in
             guard let identity = items.flatMap(\.identities).first,
                   store.hasFace(identity: identity) else { return false }
@@ -389,7 +517,7 @@ struct PlaygroundView: View {
         }
     }
 
-    /// The floating toolbar on a hovered block: font, settings, order, duplicate, remove.
+    /// The floating toolbar of the clicked block: font, settings, order, duplicate, remove.
     private func tools(_ block: Binding<PlaygroundBlock>, face: FontFace?) -> some View {
         let value = block.wrappedValue
         let index = document.blocks.firstIndex { $0.id == value.id } ?? 0
@@ -405,13 +533,8 @@ struct PlaygroundView: View {
             Divider()
                 .frame(height: 14)
                 .padding(.horizontal, 2)
-            toolButton("slider.horizontal.3", help: "Size, tracking, leading, and padding", active: settingsFor == value.id) {
-                settingsFor = settingsFor == value.id ? nil : value.id
-            }
-            .popover(isPresented: settingsBinding(value.id), arrowEdge: .bottom) {
-                settings(block)
-                    .padding(14)
-                    .frame(width: 320)
+            toolButton("slider.horizontal.3", help: dockOpen ? "Hide the strip below with size, tracking, leading, and padding" : "Adjust this block in the strip below: size, tracking, leading, and padding", active: dockOpen) {
+                dockOpen.toggle()
             }
             toolButton("arrow.up", help: "Move up", disabled: index == 0) {
                 document.change(undoManager, "Move Block") { document.blocks.swapAt(index, index - 1) }
@@ -430,85 +553,53 @@ struct PlaygroundView: View {
         }
         .padding(.horizontal, 6)
         .padding(.vertical, 4)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(Color.primary.opacity(0.1)))
-        .environment(\.colorScheme, paperIsDark ? .dark : .light)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).stroke(ink.opacity(0.22), lineWidth: 0.5))
     }
 
-    private func settingsBinding(_ id: UUID) -> Binding<Bool> {
-        Binding(
-            get: { settingsFor == id },
-            set: { open in
-                if open {
-                    settingsFor = id
-                } else if settingsFor == id {
-                    settingsFor = nil
+    /// The font of a block, picked the way fonts are picked everywhere else: a search over the library, with the
+    /// pinned fonts and the other cuts of the family first.
+    private func fontMenu(_ block: Binding<PlaygroundBlock>, face: FontFace?) -> some View {
+        let id = block.wrappedValue.id
+        var actions: [AddFontButton.Action] = []
+        if let face {
+            actions.append(.init(title: "Show Info") {
+                store.selection = [face.id]
+                store.outsideSelection = []
+                store.infoPanelOpen = true
+            })
+            actions.append(.init(title: "Clear font") {
+                document.change(undoManager, "Clear Font") {
+                    block.wrappedValue.fontIdentity = ""
+                    block.wrappedValue.letters = []
                 }
-            }
+            })
+        }
+        return AddFontButton(
+            title: blockTitle(block.wrappedValue, face: face),
+            help: "Pick a font for this block: a pinned cut, another cut of the family, or any font of the library. You can also drop a font onto the block. In a mix, drop a font on a letter to change just that letter.",
+            onPick: { picked in
+                document.change(undoManager, "Set Font") {
+                    block.wrappedValue.fontIdentity = picked.identity
+                    block.wrappedValue.letters = []
+                }
+            },
+            isChosen: { $0.identity == block.wrappedValue.fontIdentity },
+            tool: true,
+            current: face,
+            showsPinned: true,
+            actions: actions,
+            onOpen: { open in keepTools(id, open: open) }
         )
     }
 
-    private func fontMenu(_ block: Binding<PlaygroundBlock>, face: FontFace?) -> some View {
-        let selected = store.previewFaces.prefix(24)
-        return Menu {
-            if selected.isEmpty {
-                Text("Select fonts in the library to list them here")
-            } else {
-                Section("Selected in the library") {
-                    ForEach(Array(selected)) { candidate in
-                        Button {
-                            document.change(undoManager, "Set Font") {
-                                block.wrappedValue.fontIdentity = candidate.identity
-                                block.wrappedValue.letters = []
-                            }
-                        } label: {
-                            if candidate.identity == block.wrappedValue.fontIdentity {
-                                Label("\(candidate.family) \(candidate.style)", systemImage: "checkmark")
-                            } else {
-                                Text("\(candidate.family) \(candidate.style)")
-                            }
-                        }
-                    }
-                }
-            }
-            if let face {
-                Section("Cuts of \(face.family)") {
-                    ForEach(store.cuts(in: face.family)) { cut in
-                        Button {
-                            document.change(undoManager, "Set Font") {
-                                block.wrappedValue.fontIdentity = cut.identity
-                                block.wrappedValue.letters = []
-                            }
-                        } label: {
-                            if cut.id == face.id {
-                                Label(cut.style, systemImage: "checkmark")
-                            } else {
-                                Text(cut.style)
-                            }
-                        }
-                    }
-                }
-                Divider()
-                Button("Show in library") {
-                    store.selection = [face.id]
-                    store.outsideSelection = []
-                }
-                Button("Clear font") {
-                    document.change(undoManager, "Clear Font") {
-                        block.wrappedValue.fontIdentity = ""
-                        block.wrappedValue.letters = []
-                    }
-                }
-            }
-        } label: {
-            Text(blockTitle(block.wrappedValue, face: face))
-                .font(.caption.weight(.semibold))
-                .lineLimit(1)
+    /// The tools of a block stay while one of their popovers is open, even with the pointer over the popover.
+    private func keepTools(_ id: UUID, open: Bool) {
+        if open {
+            settingsFor = id
+        } else if settingsFor == id {
+            settingsFor = nil
         }
-        .menuStyle(.borderlessButton)
-        .fixedSize(horizontal: true, vertical: false)
-        .frame(maxWidth: 240)
-        .help("Pick a font for this block: one of the fonts selected in the library, or another cut of the same family. You can also drop a font onto the block. In a mix, drop a font on a letter to change just that letter.")
     }
 
     private func blockTitle(_ block: PlaygroundBlock, face: FontFace?) -> String {
@@ -521,7 +612,6 @@ struct PlaygroundView: View {
 
     /// A cut for the letters selected in a block: from the library selection, the block's family, or anywhere.
     private func lettersMenu(_ block: Binding<PlaygroundBlock>, letters: [NSRange], face: FontFace?) -> some View {
-        let selected = store.previewFaces.prefix(24)
         let current = Set(letters.map { block.wrappedValue.letterFonts[$0.location] ?? block.wrappedValue.fontIdentity })
         let title = letters.count == 1 ? "1 letter" : "\(letters.count) letters"
         let pick: (String?, String) -> Void = { identity, name in
@@ -529,47 +619,23 @@ struct PlaygroundView: View {
                 block.wrappedValue.setFont(identity, forLettersIn: letters)
             }
         }
-        return HStack(spacing: 4) {
-            Menu {
-                if !selected.isEmpty {
-                    Section("Selected in the library") {
-                        ForEach(Array(selected)) { candidate in
-                            Button {
-                                pick(candidate.identity, "Set Letters")
-                            } label: {
-                                if current == [candidate.identity] {
-                                    Label("\(candidate.family) \(candidate.style)", systemImage: "checkmark")
-                                } else {
-                                    Text("\(candidate.family) \(candidate.style)")
-                                }
-                            }
-                        }
-                    }
-                }
-                if let face {
-                    Section("Cuts of \(face.family)") {
-                        ForEach(store.cuts(in: face.family)) { cut in
-                            Button(cut.style) { pick(cut.identity, "Set Letters") }
-                        }
-                    }
-                    Divider()
-                    Button("Back to the block font") { pick(nil, "Reset Letters") }
-                }
-            } label: {
-                Label(title, systemImage: "character.cursor.ibeam")
-                    .font(.caption.weight(.semibold))
-                    .lineLimit(1)
-            }
-            .menuStyle(.borderlessButton)
-            .fixedSize()
-            .help("Give the selected letters a cut of their own. You can also drop a font onto the selection.")
-            AddFontButton(
-                title: "Other…",
-                help: "Give the selected letters any cut from the library",
-                onPick: { face in pick(face.identity, "Set Letters") },
-                isChosen: { current == [$0.identity] }
-            )
+        var actions: [AddFontButton.Action] = []
+        if face != nil {
+            actions.append(.init(title: "Back to the block font") { pick(nil, "Reset Letters") })
         }
+        let id = block.wrappedValue.id
+        return AddFontButton(
+            title: title,
+            help: "Give the selected letters a cut of their own: a pinned cut, another cut of the family, or any font of the library. You can also drop a font onto the selection.",
+            onPick: { picked in pick(picked.identity, "Set Letters") },
+            isChosen: { current == [$0.identity] },
+            tool: true,
+            symbol: "character.cursor.ibeam",
+            current: face,
+            showsPinned: true,
+            actions: actions,
+            onOpen: { open in keepTools(id, open: open) }
+        )
     }
 
     private func selectedLetters(_ block: PlaygroundBlock) -> [NSRange] {
@@ -594,47 +660,30 @@ struct PlaygroundView: View {
         return result
     }
 
-    private func settings(_ block: Binding<PlaygroundBlock>) -> some View {
-        // Size in the unit chosen for the preview: pt, CSS px, or rem.
+    /// Size, tracking, and leading of a block, in the unit chosen for the preview: pt, CSS px, or rem.
+    private func adjustRows(_ block: Binding<PlaygroundBlock>) -> some View {
         let displaySize = Binding<Double>(
             get: { unit.display(from: block.wrappedValue.size) },
             set: { block.wrappedValue.size = unit.points(from: $0) }
         )
-        let sizeStep: Double = unit == .rem ? 0.05 : 1
-        let sizeFormat = unit == .rem ? "%.2f rem" : "%.0f \(unit.title)"
-        return VStack(spacing: 8) {
-            HStack(spacing: 8) {
-                Text("Unit")
-                    .foregroundStyle(.secondary)
-                    .frame(width: 58, alignment: .leading)
-                Picker("Unit", selection: $unitRaw) {
-                    ForEach(SpecimenUnit.allCases, id: \.rawValue) { candidate in
-                        Text(candidate.title).tag(candidate.rawValue)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .controlSize(.small)
-                .frame(maxWidth: 150)
-                .help("Unit for size and padding: points, CSS pixels, or rem")
-                Spacer(minLength: 0)
-            }
-            metric("Size", value: displaySize, range: unit.display(from: 6)...unit.display(from: 240), step: sizeStep, format: sizeFormat, reset: unit.display(from: 32))
-            metric("Tracking", value: block.tracking, range: -0.1...0.5, step: 0.005, format: "%.3f em", reset: 0)
-            metric("Leading", value: block.leading, range: 0.5...2.6, step: 0.05, format: "%.2f", reset: 1.2)
-            Divider()
-                .padding(.vertical, 2)
-            // Padding follows the same unit, so a layout can be read straight into CSS.
-            let padRange = unit.display(from: 0)...unit.display(from: 200)
-            let padStep: Double = unit == .rem ? 0.125 : 2
-            let padFormat = unit == .rem ? "%.3f rem" : "%.0f \(unit.title)"
-            let padReset = unit.display(from: 24)
-            metric("Top", value: inUnit(block.padTop), range: padRange, step: padStep, format: padFormat, reset: padReset)
-            metric("Bottom", value: inUnit(block.padBottom), range: padRange, step: padStep, format: padFormat, reset: padReset)
-            metric("Left", value: inUnit(block.padLeft), range: padRange, step: padStep, format: padFormat, reset: padReset)
-            metric("Right", value: inUnit(block.padRight), range: padRange, step: padStep, format: padFormat, reset: padReset)
+        return VStack(alignment: .leading, spacing: 3) {
+            DockSliderRow(title: "Size", value: displaySize, range: unit.display(from: 6)...unit.display(from: 240), step: unit == .rem ? 0.05 : 1, fraction: unit == .rem ? 2 : 0, reset: { block.wrappedValue.size = 32 })
+            DockSliderRow(title: "Tracking", value: block.tracking, range: -0.1...0.5, step: 0.005, fraction: 3, reset: { block.wrappedValue.tracking = 0 })
+            DockSliderRow(title: "Leading", value: block.leading, range: 0.5...2.6, step: 0.05, fraction: 2, reset: { block.wrappedValue.leading = 1.2 })
         }
-        .font(.caption)
+    }
+
+    /// Padding follows the same unit, so a layout can be read straight into CSS.
+    private func paddingRows(_ block: Binding<PlaygroundBlock>) -> some View {
+        let range = unit.display(from: 0)...unit.display(from: 200)
+        let step: Double = unit == .rem ? 0.125 : 2
+        let fraction = unit == .rem ? 3 : 0
+        return VStack(alignment: .leading, spacing: 3) {
+            DockSliderRow(title: "Top", value: inUnit(block.padTop), range: range, step: step, fraction: fraction, reset: { block.wrappedValue.padTop = 24 })
+            DockSliderRow(title: "Bottom", value: inUnit(block.padBottom), range: range, step: step, fraction: fraction, reset: { block.wrappedValue.padBottom = 24 })
+            DockSliderRow(title: "Left", value: inUnit(block.padLeft), range: range, step: step, fraction: fraction, reset: { block.wrappedValue.padLeft = 24 })
+            DockSliderRow(title: "Right", value: inUnit(block.padRight), range: range, step: step, fraction: fraction, reset: { block.wrappedValue.padRight = 24 })
+        }
     }
 
     /// A point value shown and edited in the chosen unit; the block keeps storing points.
@@ -645,36 +694,11 @@ struct PlaygroundView: View {
         )
     }
 
-    private func metric(_ title: String, value: Binding<Double>, range: ClosedRange<Double>, step: Double, format: String, reset: Double) -> some View {
-        let snapped = Binding<Double>(
-            get: { value.wrappedValue },
-            set: { value.wrappedValue = SpecimenView.snap($0, step: step, range: range) }
-        )
-        return HStack(spacing: 8) {
-            Text(title)
-                .foregroundStyle(.secondary)
-                .frame(width: 58, alignment: .leading)
-            Slider(value: snapped, in: range)
-                .controlSize(.small)
-            Text(String(format: format, value.wrappedValue))
-                .monospacedDigit()
-                .frame(width: 64, alignment: .trailing)
-            Button {
-                value.wrappedValue = reset
-            } label: {
-                Image(systemName: "arrow.counterclockwise")
-                    .font(.caption2)
-            }
-            .buttonStyle(.borderless)
-            .help("Back to \(String(format: format, reset))")
-        }
-    }
-
     private func toolButton(_ symbol: String, help: String, active: Bool = false, disabled: Bool = false, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: symbol)
-                .font(.caption.weight(.medium))
-                .foregroundStyle(active ? Color.accentColor : Color.primary.opacity(disabled ? 0.3 : 0.75))
+                .font(.uiCaption.weight(.medium))
+                .foregroundStyle(active ? AppChrome.highlight : Color.primary.opacity(disabled ? 0.3 : 0.75))
                 .frame(width: 20, height: 18)
                 .contentShape(Rectangle())
         }
@@ -696,9 +720,10 @@ struct PlaygroundView: View {
             }
             document.change(undoManager, "Add Block") { document.blocks.append(block) }
             settingsFor = nil
+            activeBlock = block.id
         } label: {
             Label("Add block", systemImage: "plus")
-                .font(.caption)
+                .font(.uiCaption)
                 .foregroundStyle(ink.opacity(0.55))
         }
         .buttonStyle(.plain)
@@ -771,14 +796,9 @@ struct PlaygroundView: View {
         )
     }
 
-    private var paper: NSColor { NSColor.fontsoHex(backgroundHex, fallback: .white) }
-    private var inkColor: NSColor { NSColor.fontsoHex(foregroundHex, fallback: .black) }
+    private var paper: NSColor { theme.paper }
+    private var inkColor: NSColor { theme.ink }
     private var ink: Color { Color(nsColor: inkColor) }
-
-    private var paperIsDark: Bool {
-        guard let rgb = paper.usingColorSpace(.sRGB) else { return false }
-        return (0.299 * rgb.redComponent + 0.587 * rgb.greenComponent + 0.114 * rgb.blueComponent) < 0.5
-    }
 }
 
 // MARK: - Export
@@ -843,92 +863,162 @@ struct PlaygroundExportOptions {
 }
 
 /// Format, orientation, and file type for the Playground export, with the file name the fonts give it.
+/// What is chosen is a filled button, so it reads at a glance; the sheet keeps the colours of the theme.
 struct PlaygroundExportSheet: View {
     var families: [String]
     var screenWidth: CGFloat
     var export: (PlaygroundExportOptions) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var options = PlaygroundExportOptions()
+    @State private var customWidth = "210"
+    @State private var customHeight = "297"
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 12) {
             Text("Export the playground")
-                .font(.headline)
-            Picker("Page", selection: $options.paper) {
+                .font(AppChrome.type(13, weight: .medium))
+                .foregroundStyle(AppChrome.ink)
+                .padding(.bottom, 2)
+            row("Page") {
                 ForEach(PlaygroundPaper.allCases) { paper in
-                    Text(paper.title).tag(paper)
+                    choice(paper.title, on: options.paper == paper, help: "Page size: \(paper.title)") {
+                        options.paper = paper
+                    }
                 }
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .help("Page size for the export")
             switch options.paper {
             case .screen:
-                Text("One page as wide as the preview column (\(Int(screenWidth)) pt) and as tall as the text.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                note("One page as wide as the Playground is now (\(Int(screenWidth)) pt) and as tall as the text.")
             case .a4, .a3:
-                Picker("Orientation", selection: $options.landscape) {
-                    Text("Portrait").tag(false)
-                    Text("Landscape").tag(true)
+                row("Orientation") {
+                    choice("Portrait", on: !options.landscape, help: "Upright page") { options.landscape = false }
+                    choice("Landscape", on: options.landscape, help: "Page on its side") { options.landscape = true }
                 }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .frame(maxWidth: 220)
-                .help("Portrait or landscape")
-                Text("12 mm margin. Longer text runs over several pages.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                note("12 mm margin. Longer text runs over several pages.")
             case .custom:
-                HStack(spacing: 8) {
-                    TextField("Width", value: $options.customWidth, format: .number)
-                        .frame(width: 64)
+                row("Size") {
+                    field("Width", text: $customWidth)
                     Text("×")
-                    TextField("Height", value: $options.customHeight, format: .number)
-                        .frame(width: 64)
+                        .foregroundStyle(AppChrome.half)
+                    field("Height", text: $customHeight)
                     Text("mm")
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(AppChrome.half)
                 }
-                .textFieldStyle(.roundedBorder)
-                Text("12 mm margin. Longer text runs over several pages.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                note("12 mm margin. Longer text runs over several pages.")
             }
-            Picker("File", selection: $options.kind) {
+            row("File") {
                 ForEach(PlaygroundExportKind.allCases) { kind in
-                    Text(kind.title).tag(kind)
+                    choice(
+                        kind.title,
+                        on: options.kind == kind,
+                        help: kind == .pdf ? "PDF keeps the text sharp at any size" : "PNG is an image, 2× for Retina"
+                    ) {
+                        options.kind = kind
+                    }
                 }
             }
-            .pickerStyle(.segmented)
-            .frame(maxWidth: 220)
-            .help("PDF keeps the text sharp at any size; PNG is an image")
             if options.kind == .png, options.paper != .screen {
-                Text("PNG is 2× for Retina; every page becomes its own file.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                note("PNG is 2× for Retina; every page becomes its own file.")
             }
-            VStack(alignment: .leading, spacing: 2) {
-                Text("File name")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+            row("Name") {
                 Text(PlaygroundPage.fileName(families: families, kind: options.kind))
-                    .font(.callout)
+                    .foregroundStyle(AppChrome.ink)
                     .lineLimit(2)
                     .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            HStack {
-                Spacer()
+            Rectangle()
+                .fill(AppChrome.hairline)
+                .frame(height: 0.5)
+                .padding(.top, 2)
+            HStack(spacing: 6) {
+                Text(summary)
+                    .font(AppChrome.small)
+                    .foregroundStyle(AppChrome.half)
+                    .lineLimit(1)
+                Spacer(minLength: 8)
                 Button("Cancel") { dismiss() }
+                    .buttonStyle(.paper)
                     .keyboardShortcut(.cancelAction)
                     .help("Close without exporting")
-                Button("Export…") { export(options) }
+                Button("Export…") { export(resolved) }
+                    .buttonStyle(.paperProminent)
                     .keyboardShortcut(.defaultAction)
-                    .buttonStyle(.borderedProminent)
                     .help("Choose where to save the export")
             }
         }
-        .padding(20)
-        .frame(width: 400)
+        .font(AppChrome.type(11))
+        .padding(18)
+        .frame(width: 420)
+        .modifier(ChromeSheet())
+    }
+
+    /// What will be written, in one line beside the buttons.
+    private var summary: String {
+        var parts = [options.paper.title]
+        switch options.paper {
+        case .a4, .a3: parts.append(options.landscape ? "landscape" : "portrait")
+        case .custom: parts.append("\(Self.shown(resolved.customWidth)) × \(Self.shown(resolved.customHeight)) mm")
+        case .screen: parts.append("\(Int(screenWidth)) pt wide")
+        }
+        parts.append(options.kind.title)
+        return parts.joined(separator: ", ")
+    }
+
+    /// The options with the custom size read from what was typed, a comma or a point as the decimal mark.
+    private var resolved: PlaygroundExportOptions {
+        var result = options
+        result.customWidth = Self.number(customWidth) ?? options.customWidth
+        result.customHeight = Self.number(customHeight) ?? options.customHeight
+        return result
+    }
+
+    private static func number(_ text: String) -> Double? {
+        let cleaned = text.replacingOccurrences(of: ",", with: ".").filter { $0.isNumber || $0 == "." }
+        guard let value = Double(cleaned), value > 0 else { return nil }
+        return value
+    }
+
+    private static func shown(_ value: Double) -> String {
+        value.formatted(.number.precision(.fractionLength(0...1)).grouping(.never))
+    }
+
+    private func row<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 5) {
+            Text(title)
+                .foregroundStyle(AppChrome.half)
+                .frame(width: 78, alignment: .leading)
+            content()
+            Spacer(minLength: 0)
+        }
+    }
+
+    private func choice(_ title: String, on: Bool, help: String, action: @escaping () -> Void) -> some View {
+        Button(title, action: action)
+            .buttonStyle(PaperButtonStyle(prominent: on))
+            .help(help)
+    }
+
+    private func field(_ title: String, text: Binding<String>) -> some View {
+        TextField(title, text: text)
+            .textFieldStyle(.plain)
+            .font(AppChrome.type(11).monospacedDigit())
+            .foregroundStyle(AppChrome.ink)
+            .multilineTextAlignment(.trailing)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
+            .frame(width: 58)
+            .background(AppChrome.control, in: RoundedRectangle(cornerRadius: 4, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 4, style: .continuous).stroke(AppChrome.ink.opacity(0.22), lineWidth: 0.5))
+            .help("\(title) in millimetres")
+    }
+
+    private func note(_ text: String) -> some View {
+        Text(text)
+            .font(AppChrome.small)
+            .foregroundStyle(AppChrome.half)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.leading, 83)
     }
 }
 
@@ -1116,16 +1206,3 @@ enum PlaygroundPage {
     }
 }
 
-extension NSColor {
-    /// A colour from six hex digits, or the fallback when the text is not a colour.
-    static func fontsoHex(_ hex: String, fallback: NSColor) -> NSColor {
-        let cleaned = hex.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
-        guard cleaned.count == 6, let number = Int(cleaned, radix: 16) else { return fallback }
-        return NSColor(
-            srgbRed: CGFloat((number >> 16) & 0xFF) / 255,
-            green: CGFloat((number >> 8) & 0xFF) / 255,
-            blue: CGFloat(number & 0xFF) / 255,
-            alpha: 1
-        )
-    }
-}

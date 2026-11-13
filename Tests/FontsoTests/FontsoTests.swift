@@ -1,5 +1,6 @@
 @testable import FontsoCore
 import Compression
+import SQLite3
 import XCTest
 
 final class FontsoTests: XCTestCase {
@@ -509,6 +510,60 @@ final class FontsoTests: XCTestCase {
         XCTAssertFalse(turn.text.localizedCaseInsensitiveContains("Richtlinien"))
         XCTAssertEqual(turn.suggestions.map(\.family), ["ABC Mono", "Kepler"])
         XCTAssertEqual(turn.suggestions.map(\.role), ["Headline", "Fließtext"])
+    }
+
+    func testPinnedFontsCanBeMovedAndSorted() {
+        let order = ["a", "b", "c", "d"]
+        // A font dragged in front of another leaves its old place.
+        XCTAssertEqual(PinOrder.place(["d"], before: "b", in: order), ["a", "d", "b", "c"])
+        XCTAssertEqual(PinOrder.place(["a"], before: "d", in: order), ["b", "c", "a", "d"])
+        // Without a target it goes to the end; a font that was not pinned joins the row where it is dropped.
+        XCTAssertEqual(PinOrder.place(["a"], before: nil, in: order), ["b", "c", "d", "a"])
+        XCTAssertEqual(PinOrder.place(["x", "x"], before: "c", in: order), ["a", "b", "x", "c", "d"])
+        XCTAssertEqual(PinOrder.place(["x"], before: "gone", in: order), ["a", "b", "c", "d", "x"])
+        // Dropped on itself, or just behind its left neighbour, a font stays where it is.
+        XCTAssertEqual(PinOrder.place(["b"], before: "b", in: order), order)
+        XCTAssertEqual(PinOrder.place(["b", "c"], before: "c", in: order), order)
+        XCTAssertEqual(PinOrder.place([], before: "a", in: order), order)
+        XCTAssertEqual(PinOrder.step("b", by: 1, in: order), ["a", "c", "b", "d"])
+        XCTAssertEqual(PinOrder.step("b", by: -5, in: order), ["b", "a", "c", "d"])
+        XCTAssertEqual(PinOrder.step("d", by: 1, in: order), order)
+        XCTAssertEqual(PinOrder.step("x", by: 1, in: order), order)
+
+        func face(_ family: String, _ style: String, weight: Int, width: Int = 5, italic: Bool = false, category: FontCategory = .sans) -> FontFace {
+            var face = sampleFace(path: "/tmp/\(family)-\(style).otf")
+            face.family = family
+            face.style = style
+            face.weightClass = weight
+            face.widthClass = width
+            face.isItalic = italic
+            face.category = category
+            return face
+        }
+        let faces = [
+            face("Univers", "Bold", weight: 700),
+            face("Garamond", "Italic", weight: 400, italic: true, category: .serif),
+            face("Univers", "Light Condensed", weight: 300, width: 3),
+            face("Garamond", "Regular", weight: 400, category: .serif),
+            face("Akzidenz 2", "Medium", weight: 500),
+            face("Akzidenz 10", "Medium", weight: 500),
+        ]
+        // A file that says 400 for every cut is sorted by what its style is called.
+        XCTAssertEqual(PinOrder.weight(of: face("Agenda", "Black", weight: 400)), 900)
+        XCTAssertEqual(PinOrder.weight(of: face("Agenda", "Extra Light Condensed", weight: 400)), 200)
+        XCTAssertEqual(PinOrder.weight(of: face("Agenda", "Regular", weight: 400)), 400)
+        XCTAssertEqual(PinOrder.weight(of: face("Agenda", "Black", weight: 650)), 650)
+        func names(_ key: PinOrder.Key) -> [String] {
+            PinOrder.sorted(faces, by: key).map { "\($0.family) \($0.style)" }
+        }
+        XCTAssertEqual(names(.name), [
+            "Akzidenz 2 Medium", "Akzidenz 10 Medium", "Garamond Regular", "Garamond Italic",
+            "Univers Light Condensed", "Univers Bold",
+        ])
+        XCTAssertEqual(names(.weight).first, "Univers Light Condensed")
+        XCTAssertEqual(names(.weight).last, "Univers Bold")
+        XCTAssertEqual(names(.width).first, "Univers Light Condensed")
+        XCTAssertEqual(Array(names(.category).prefix(2)), ["Garamond Regular", "Garamond Italic"])
     }
 
     func testResearchRanksByXHeightInsteadOfSkippingTheMeasurement() {
@@ -1424,6 +1479,46 @@ final class FontsoTests: XCTestCase {
         let avantt = FoundryLookup.typefacePage(on: URL(string: "https://displaay.net")!, name: "Avantt", html: displaay)
         XCTAssertEqual(avantt?.absoluteString, "https://displaay.net/typeface/avantt")
         XCTAssertEqual(FoundryLookup.linkedTypefaces(on: URL(string: "https://displaay.net")!, html: displaay), ["Aguzzo", "Avantt"])
+
+        // A foundry's own links come with their pages. The catalogue folder decides; pages about fonts stay out,
+        // the written name wins over the address, and every page is asked for over https.
+        let dinamo = """
+        <a href="/typefaces/ikarus"><img src="/ikarus.png"></a>
+        <a href="/typefaces/ikarus">Ikarus 33% unlocked</a>
+        <a href="http://www.abcdinamo.com/typefaces/stefan-marx">Read more</a>
+        <a href="/typefaces/trial-fonts">Trial fonts</a>
+        <a href="/fonts-in-use/arizona">Arizona at work</a>
+        <a href="/news/customize-fonts">Customize fonts</a>
+        <a href="/retail-fonts/abc-diatype/">ABC Diatype</a>
+        <a href="/about">About</a>
+        """
+        let pages = FoundryLookup.linkedTypefacePages(on: URL(string: "http://www.abcdinamo.com")!, html: dinamo)
+        XCTAssertEqual(pages.map(\.name), ["Ikarus", "Stefan Marx", "ABC Diatype"])
+        XCTAssertEqual(pages.map(\.url.absoluteString), [
+            "https://www.abcdinamo.com/typefaces/ikarus",
+            "https://www.abcdinamo.com/typefaces/stefan-marx",
+            "https://www.abcdinamo.com/retail-fonts/abc-diatype/"
+        ])
+        XCTAssertEqual(FoundryLookup.secure(URL(string: "http://www.c-a-s-t.com/fonts")!).absoluteString, "https://www.c-a-s-t.com/fonts")
+        XCTAssertEqual(FoundryLookup.secure(URL(string: "https://klim.co.nz")!).absoluteString, "https://klim.co.nz")
+        XCTAssertTrue(FoundryLookup.sameTypeface("AM Aosta", "am-aosta"))
+        XCTAssertFalse(FoundryLookup.sameTypeface("Aosta", "Aosta Mono"))
+
+        // A site without links is asked at the usual addresses, with a nonsense name beside each as the control.
+        let guesses = FoundryLookup.candidatePages(on: URL(string: "http://www.205.tf")!, name: "Plaak Sans")
+        XCTAssertEqual(guesses.first?.absoluteString, "https://www.205.tf/typefaces/plaak-sans")
+        XCTAssertTrue(guesses.map(\.absoluteString).contains("https://www.205.tf/plaak-sans"))
+        XCTAssertTrue(guesses.map(\.absoluteString).contains("https://www.205.tf/fonts/plaaksans"))
+        XCTAssertFalse(FoundryLookup.candidatePages(on: URL(string: "https://www.205.tf")!, name: "About").map(\.path).contains("/about"))
+        XCTAssertEqual(
+            FoundryLookup.controlPage(for: URL(string: "https://www.205.tf/typefaces/amiral")!).absoluteString,
+            "https://www.205.tf/typefaces/zz-no-such-typeface-q7"
+        )
+        XCTAssertTrue(FoundryLookup.isTypefaceName("Monument Grotesk Semi-Mono"))
+        XCTAssertTrue(FoundryLookup.isTypefaceName("Gothic No. 6"))
+        XCTAssertFalse(FoundryLookup.isTypefaceName("Fonts in Use"))
+        XCTAssertFalse(FoundryLookup.isTypefaceName("60 styles • Variable   Surt"))
+        XCTAssertFalse(FoundryLookup.isTypefaceName("Nosferatu Making Of A Font"))
         let releaseHTML = """
         <dt>News Fonts Release</dt>
         <dd><span>Date: </span>January 5, 2014</dd>
@@ -1512,10 +1607,43 @@ final class FontsoTests: XCTestCase {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let database = try FontDatabase(fileURL: directory.appendingPathComponent("library.sqlite"))
 
-        try database.setLicense(filePath: "/a.otf", faceIndex: 0, project: "Acme rebrand")
-        try database.setLicense(filePath: "/a.otf", faceIndex: 1, project: "Acme rebrand")
-        try database.setLicense(filePath: "/a.otf", faceIndex: 1, project: "")
-        XCTAssertEqual(try database.allLicenses(), [FaceKey.make(path: "/a.otf", index: 0): "Acme rebrand"])
+        // A cut can be licensed for several projects; each license has its own end date.
+        let first = FaceKey.make(path: "/a.otf", index: 0)
+        try database.addLicense(filePath: "/a.otf", faceIndex: 0, project: "Acme rebrand")
+        try database.addLicense(filePath: "/a.otf", faceIndex: 0, project: "Zeit Magazin")
+        try database.addLicense(filePath: "/a.otf", faceIndex: 0, project: "Acme rebrand")
+        try database.addLicense(filePath: "/a.otf", faceIndex: 1, project: "Acme rebrand")
+        try database.removeLicense(filePath: "/a.otf", faceIndex: 1)
+        XCTAssertEqual(try database.allLicenseRecords(), [first: [
+            LicenseRecord(project: "Acme rebrand", validUntil: 0),
+            LicenseRecord(project: "Zeit Magazin", validUntil: 0)
+        ]])
+        try database.setLicenseEnd(filePath: "/a.otf", faceIndex: 0, project: "Zeit Magazin", until: 1_800_000_000)
+        try database.setLicenseEnd(filePath: "/a.otf", faceIndex: 1, project: "Zeit Magazin", until: 1_800_000_000)
+        XCTAssertEqual(try database.allLicenseRecords(), [first: [
+            LicenseRecord(project: "Acme rebrand", validUntil: 0),
+            LicenseRecord(project: "Zeit Magazin", validUntil: 1_800_000_000)
+        ]])
+        try database.setLicenseEnd(filePath: "/a.otf", faceIndex: 0, project: "Zeit Magazin", until: 0)
+        try database.removeLicense(filePath: "/a.otf", faceIndex: 0, project: "Acme rebrand")
+        XCTAssertEqual(try database.allLicenseRecords(), [first: [LicenseRecord(project: "Zeit Magazin", validUntil: 0)]])
+
+        // A library from before, with one license to a cut, keeps it and its end date and can take a second.
+        let oldFile = directory.appendingPathComponent("old.sqlite")
+        var handle: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(oldFile.path, &handle), SQLITE_OK)
+        XCTAssertEqual(sqlite3_exec(handle, """
+            CREATE TABLE licenses (file_path TEXT NOT NULL, face_index INTEGER NOT NULL, project TEXT NOT NULL,
+                updated_at REAL NOT NULL, valid_until REAL NOT NULL DEFAULT 0, PRIMARY KEY (file_path, face_index));
+            INSERT INTO licenses VALUES ('/b.otf', 2, 'Old client', 1, 1700000000);
+            """, nil, nil, nil), SQLITE_OK)
+        sqlite3_close(handle)
+        let old = try FontDatabase(fileURL: oldFile)
+        try old.addLicense(filePath: "/b.otf", faceIndex: 2, project: "New client")
+        XCTAssertEqual(try old.allLicenseRecords(), [FaceKey.make(path: "/b.otf", index: 2): [
+            LicenseRecord(project: "Old client", validUntil: 1_700_000_000),
+            LicenseRecord(project: "New client", validUntil: 0)
+        ]])
 
         let search = try database.createShapeSearch(title: "New shape", referenceIdentity: "a\n0", query: "Arial")
         var tuning = MatchTuning.standard
@@ -1643,6 +1771,57 @@ final class FontsoTests: XCTestCase {
         ])
         let synced = try XCTUnwrap(try database.foundryNotices().first { $0.name == "Avantt" })
         XCTAssertEqual(synced.url, corrected)
+
+        // Reading a foundry again keeps the day a name was first found, adds what is new, and drops what left the site.
+        try database.syncFoundryNotices(host: added.host, drafts: [
+            FoundryNoticeDraft(name: "Avantt", url: added.url, publishedAt: nil),
+            FoundryNoticeDraft(name: "Roobert", url: added.url, publishedAt: nil),
+            FoundryNoticeDraft(name: "Matter", url: added.url, publishedAt: nil)
+        ])
+        let first = try XCTUnwrap(try database.foundryNotices().first { $0.name == "Roobert" })
+        Thread.sleep(forTimeInterval: 0.05)
+        try database.syncFoundryNotices(host: added.host, drafts: [
+            FoundryNoticeDraft(name: "Avantt", url: added.url, publishedAt: nil),
+            FoundryNoticeDraft(name: "Roobert", url: added.url, publishedAt: nil),
+            FoundryNoticeDraft(name: "Teodor", url: added.url, publishedAt: nil)
+        ])
+        let reread = try database.foundryNotices()
+        let second = try XCTUnwrap(reread.first { $0.name == "Roobert" })
+        let newcomer = try XCTUnwrap(reread.first { $0.name == "Teodor" })
+        XCTAssertEqual(second.discoveredAt, first.discoveredAt)
+        XCTAssertGreaterThan(newcomer.discoveredAt, second.discoveredAt)
+        XCTAssertNil(reread.first { $0.name == "Matter" })
+        XCTAssertNotNil(reread.first { $0.name == "Avantt" })
+
+        // The page of a font, once known, stays when a later read only knows the front page; another spelling of
+        // the name is the same font, not a new one; and a line about fonts is no typeface, old or new.
+        let teodorPage = try XCTUnwrap(URL(string: "https://displaay.net/typeface/teodor"))
+        try database.setNoticePage(id: newcomer.id, url: teodorPage)
+        try database.setNoticeSeen(id: newcomer.id, seen: true)
+        try database.syncFoundryNotices(host: added.host, drafts: [
+            FoundryNoticeDraft(name: "Avantt", url: added.url, publishedAt: nil),
+            FoundryNoticeDraft(name: "Roobert", url: try XCTUnwrap(URL(string: "https://displaay.net/typeface/roobert")), publishedAt: nil),
+            FoundryNoticeDraft(name: "TEODOR", url: added.url, publishedAt: nil),
+            FoundryNoticeDraft(name: "Fonts in Use", url: added.url, publishedAt: nil)
+        ])
+        let paged = try database.foundryNotices()
+        XCTAssertEqual(paged.filter { $0.name.lowercased() == "teodor" }.map(\.name), ["Teodor"])
+        XCTAssertEqual(paged.first { $0.name == "Teodor" }?.url, teodorPage)
+        XCTAssertEqual(paged.first { $0.name == "Teodor" }?.discoveredAt, newcomer.discoveredAt)
+        XCTAssertEqual(paged.first { $0.name == "Roobert" }?.url.path, "/typeface/roobert")
+        XCTAssertEqual(paged.first { $0.name == "Avantt" }?.url, corrected)
+        XCTAssertNil(paged.first { $0.name == "Fonts in Use" })
+
+        // Names a closer reading of the site finds were there all along: they go in as seen, not as news.
+        try database.syncFoundryNotices(host: added.host, drafts: [
+            FoundryNoticeDraft(name: "Avantt", url: added.url, publishedAt: nil),
+            FoundryNoticeDraft(name: "Roobert", url: added.url, publishedAt: nil),
+            FoundryNoticeDraft(name: "Teodor", url: added.url, publishedAt: nil),
+            FoundryNoticeDraft(name: "Aguzzo", url: added.url, publishedAt: nil)
+        ], known: true)
+        let closer = try database.foundryNotices()
+        XCTAssertEqual(closer.first { $0.name == "Aguzzo" }?.seen, true)
+        XCTAssertEqual(closer.first { $0.name == "Roobert" }?.seen, false)
 
         // Saved links in lists can be corrected in place, in every list that holds them.
         let one = try database.createGroup(name: "One")

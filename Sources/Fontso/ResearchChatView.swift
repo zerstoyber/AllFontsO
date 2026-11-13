@@ -10,21 +10,19 @@ private struct ChatFontChip: Identifiable, Equatable {
 
 private struct FlowChips: View {
     var titles: [String]
+    @Environment(\.surface) private var surface
 
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 4) {
             ForEach(Array(titles.enumerated()), id: \.offset) { _, title in
-                HStack(spacing: 5) {
-                    Image(systemName: title.hasPrefix("Liste ") ? "list.bullet" : "textformat")
-                        .font(.caption2.weight(.semibold))
-                    Text(title.hasPrefix("Liste ") ? String(title.dropFirst("Liste ".count)) : title)
-                        .font(.caption.weight(.medium))
-                        .lineLimit(1)
-                }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .background(Color.accentColor.opacity(0.16), in: Capsule())
-                .overlay(Capsule().strokeBorder(Color.accentColor.opacity(0.45), lineWidth: 1))
+                Text(title.hasPrefix("Liste ") ? "List: " + String(title.dropFirst("Liste ".count)) : title)
+                    .font(AppChrome.small)
+                    .foregroundStyle(surface.ink)
+                    .lineLimit(1)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2.5)
+                    .background(surface.control, in: RoundedRectangle(cornerRadius: 4, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 4, style: .continuous).stroke(surface.stroke, lineWidth: 0.5))
             }
         }
     }
@@ -36,7 +34,6 @@ struct ResearchChatView: View {
     @State private var draft = ""
     @State private var showModels = false
     @State private var modelLabel = ResearchSettings.label
-    @State private var choices: [ResearchChoice] = []
     @State private var selectionAnchor: Int64?
     @State private var attachedImage: NSImage?
     @State private var imageDrop = false
@@ -45,8 +42,35 @@ struct ResearchChatView: View {
     @State private var copiedChat = false
     @State private var lastFontDrop = Date.distantPast
     @State private var fontChips: [ChatFontChip] = []
+    /// The suggested families that are unfolded into their cuts, by message and family.
+    @State private var openCards: Set<String> = []
+    @Environment(\.surface) private var surface
 
     var body: some View {
+        VStack(spacing: 0) {
+            // The chat's own name stands in the navigation; here the pane only says what it is.
+            PaneTitle(title: "Chat", detail: modelLabel) {
+                Button(copiedChat ? "Copied" : "Copy") { copyChat() }
+                    .buttonStyle(.chip(on: copiedChat))
+                    .disabled(store.researchMessages.isEmpty)
+                    .help("Copy this chat")
+                modelMenu
+            }
+            conversation
+        }
+        .sheet(isPresented: $showModels, onDismiss: { modelLabel = ResearchSettings.label }) {
+            ResearchModelSheet()
+        }
+        .task {
+            // The chat answers with Apple Intelligence; a model chosen in an earlier version steps back to it.
+            if ResearchSettings.kind != "apple" {
+                ResearchSettings.useApple()
+                modelLabel = ResearchSettings.label
+            }
+        }
+    }
+
+    private var conversation: some View {
         ZStack(alignment: .bottom) {
             GeometryReader { proxy in
                 ScrollViewReader { scroller in
@@ -56,9 +80,9 @@ struct ResearchChatView: View {
                                 starters
                             }
                             if store.researchMessages.contains(where: { !$0.suggestions.isEmpty }) {
-                                Text("Click a card to preview it. Command-click adds another font, Shift-click selects a range.")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
+                                Text("Click a card to select it and see its Info. Command-click adds another font, Shift-click selects a range.")
+                                    .font(AppChrome.small)
+                                    .foregroundStyle(surface.muted)
                                     .fixedSize(horizontal: false, vertical: true)
                             }
                             ForEach(store.researchMessages) { message in
@@ -70,9 +94,9 @@ struct ResearchChatView: View {
                                     ProgressView()
                                         .controlSize(.small)
                                     Text(comparingPicture ? "Comparing letterforms…" : "Thinking…")
-                                        .foregroundStyle(.secondary)
+                                        .foregroundStyle(surface.half)
                                 }
-                                .font(.callout)
+                                .font(AppChrome.type())
                                 .id("working")
                             }
                         }
@@ -96,40 +120,37 @@ struct ResearchChatView: View {
         }
         .onPreferenceChange(OverlayHeightKey.self) { composerHeight = $0 }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .onDrop(of: [UTType.image, UTType.fileURL], isTargeted: $imageDrop) { providers in
-            loadDroppedImage(providers)
-        }
-        .dropDestination(for: FontDragItem.self) { items, _ in
-            acceptFontDrop(items)
+        // One drop for the whole chat: a font, a family, or a list from the navigation, or a picture.
+        .onDrop(of: [UTType.json, UTType.image, UTType.fileURL], isTargeted: $imageDrop) { providers in
+            let fonts = providers.filter { $0.hasItemConformingToTypeIdentifier(UTType.json.identifier) }
+            guard !fonts.isEmpty else { return loadDroppedImage(providers) }
+            FontDragItem.load(fonts) { items in
+                acceptFontDrop(items)
+            }
             return true
-        } isTargeted: { fontDrop = $0 }
+        }
         .onAppear { consumeResearchReference() }
         .onChange(of: store.researchReference) { _, _ in
             consumeResearchReference()
         }
         .overlay {
             if imageDrop || fontDrop {
-                RoundedRectangle(cornerRadius: 12)
-                    .stroke(Color.accentColor, lineWidth: 3)
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(surface.ink, lineWidth: 1)
                     .padding(6)
                     .allowsHitTesting(false)
             }
         }
         .overlay {
-            if fontDrop {
+            if fontDrop || imageDrop {
                 Text("Drop to add to the chat")
-                    .font(.callout.weight(.semibold))
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 8)
-                    .background(.regularMaterial, in: Capsule())
+                    .font(AppChrome.type(12, weight: .medium))
+                    .foregroundStyle(surface.ink)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(DockBackground())
                     .allowsHitTesting(false)
             }
-        }
-        .sheet(isPresented: $showModels, onDismiss: { modelLabel = ResearchSettings.label }) {
-            ResearchModelSheet()
-        }
-        .task {
-            choices = await ResearchConnection.discover()
         }
     }
 
@@ -137,69 +158,32 @@ struct ResearchChatView: View {
         store.isResearching && store.researchMessages.last?.imagePath.isEmpty == false
     }
 
+    /// The composer floats over the chat like the dock over the preview, and folds into a chip.
     private var researchCard: some View {
-        HStack(spacing: 0) {
-            Spacer(minLength: 10)
-            Group {
-                if composerOpen {
-                    composer
-                        .frame(maxWidth: .infinity)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                .stroke(Color.primary.opacity(0.08))
-                        )
-                        .shadow(color: Color.black.opacity(0.16), radius: 16, y: 6)
-                } else {
-                    Button {
-                        composerOpen = true
-                    } label: {
-                        Label("Research", systemImage: "bubble.left")
-                            .font(.caption.weight(.semibold))
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 8)
-                    }
-                    .buttonStyle(.plain)
-                    .background(.regularMaterial, in: Capsule())
-                    .overlay(Capsule().stroke(Color.primary.opacity(0.08)))
-                    .shadow(color: Color.black.opacity(0.16), radius: 10, y: 4)
-                    .help("Show Research")
+        Group {
+            if composerOpen {
+                // As wide as a message of your own and at the right, where your messages appear.
+                composer
+                    .frame(maxWidth: 520)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .background(DockBackground())
+                    .clipShape(RoundedRectangle(cornerRadius: AppChrome.dockRadius, style: .continuous))
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+            } else {
+                DockPill(title: "Message", help: "Show the message field") {
+                    composerOpen = true
                 }
             }
-            .frame(maxWidth: 720)
-            Spacer(minLength: 10)
         }
+        .padding(.horizontal, 16)
         .padding(.bottom, 12)
     }
 
     private var composer: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                Text("Research")
-                    .font(.caption.weight(.semibold))
-                Spacer(minLength: 8)
-                Button {
-                    copyChat()
-                } label: {
-                    Image(systemName: copiedChat ? "checkmark" : "doc.on.doc")
-                }
-                .buttonStyle(.borderless)
-                .help("Copy this chat")
-                .disabled(store.researchMessages.isEmpty)
-                modelMenu
-                Button {
-                    composerOpen = false
-                } label: {
-                    Image(systemName: "chevron.down")
-                        .font(.caption.weight(.semibold))
-                }
-                .buttonStyle(.borderless)
-                .help("Hide Research")
-            }
+        VStack(alignment: .leading, spacing: 6) {
             if !fontChips.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 6) {
+                    HStack(spacing: 4) {
                         ForEach(fontChips) { chip in
                             fontChip(chip.title) {
                                 fontChips.removeAll { $0.id == chip.id }
@@ -214,13 +198,11 @@ struct ResearchChatView: View {
                         .resizable()
                         .scaledToFit()
                         .frame(maxWidth: 180, maxHeight: 72)
-                        .clipShape(RoundedRectangle(cornerRadius: 6))
-                    Button {
+                        .clipShape(RoundedRectangle(cornerRadius: AppChrome.cardRadius, style: .continuous))
+                    Button("Remove picture") {
                         self.attachedImage = nil
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
                     }
-                    .buttonStyle(.borderless)
+                    .buttonStyle(.chip())
                     .help("Remove the picture")
                     Spacer(minLength: 0)
                 }
@@ -228,102 +210,71 @@ struct ResearchChatView: View {
             ZStack(alignment: .topLeading) {
                 PromptEditor(
                     text: $draft,
+                    ink: AppChrome.inkNS,
                     onSubmit: send,
-                    onFonts: insertReferences,
+                    onFonts: acceptFontDrop,
                     onFontHover: { fontDrop = $0 }
                 )
                 if draft.isEmpty && fontChips.isEmpty {
-                    Text(attachedImage == nil ? "Ask for a typeface, or drop a font here" : "Optional note about the picture")
-                        .foregroundStyle(.tertiary)
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 12)
+                    Text(attachedImage == nil ? "Ask for a typeface, or drop a font or a list here" : "Optional note about the picture")
+                        .font(AppChrome.type())
+                        .foregroundStyle(surface.muted)
+                        .padding(.vertical, 2)
                         .allowsHitTesting(false)
                 }
             }
             .frame(maxWidth: .infinity)
-            .frame(minHeight: 64, idealHeight: 96, maxHeight: 140)
-            .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
-            .overlay(
-                RoundedRectangle(cornerRadius: 10)
-                    .stroke(fontDrop ? Color.accentColor : Color.secondary.opacity(0.35), lineWidth: fontDrop ? 2 : 1)
-            )
-            .dropDestination(for: FontDragItem.self, action: { items, _ in
-                acceptFontDrop(items)
-                return true
-            }, isTargeted: { fontDrop = $0 })
+            .frame(minHeight: 40, idealHeight: 56, maxHeight: 120)
             composerActions
         }
-        .padding(12)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
     }
 
     private var composerActions: some View {
-        HStack(spacing: 8) {
-            Button {
+        HStack(spacing: 5) {
+            Button("Image") {
                 pickImage()
-            } label: {
-                Label("Image", systemImage: "photo")
             }
+            .buttonStyle(.chip(on: attachedImage != nil))
             .disabled(store.isResearching)
             .help("Find library fonts that look like a picture")
             Spacer(minLength: 8)
-            Button(action: send) {
-                Label("Send", systemImage: "arrow.up.circle.fill")
-            }
-            .disabled(store.isResearching || (draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && fontChips.isEmpty && attachedImage == nil))
-            .help("Send")
+            Button("Hide") { composerOpen = false }
+                .buttonStyle(.chip())
+                .help("Fold the message field away")
+            Button("Send", action: send)
+                .buttonStyle(.chip(on: canSend))
+                .disabled(!canSend)
+                .help("Send. Return sends too; Shift-Return starts a new line.")
         }
+    }
+
+    private var canSend: Bool {
+        !store.isResearching && !(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && fontChips.isEmpty && attachedImage == nil)
     }
 
     private var modelMenu: some View {
-        Menu {
-            ForEach(choices) { choice in
-                Button(choice.title) { applyModel(choice) }
-            }
-            if !choices.isEmpty {
-                Divider()
-            }
-            Button("Other model…") { showModels = true }
-            Button(store.mcpEnabled ? "Your own AI (MCP on)…" : "Use with your own AI…") { showModels = true }
-        } label: {
-            HStack(spacing: 4) {
-                Image(systemName: "cpu")
-                Text(modelLabel)
-                    .lineLimit(1)
-                if store.mcpEnabled {
-                    Image(systemName: "point.3.connected.trianglepath.dotted")
-                        .help("Other apps may control AllFontsO over MCP")
-                }
-                Image(systemName: "chevron.up.chevron.down")
-                    .font(.caption2)
-            }
-            .font(.caption.weight(.medium))
-        }
-        .menuStyle(.borderlessButton)
-        .frame(maxWidth: 200)
-        .help("Choose the model")
-    }
-
-    private func applyModel(_ choice: ResearchChoice) {
-        if choice.kind == "apple" {
-            ResearchSettings.useApple()
-        } else {
-            ResearchSettings.useCompatible(baseURL: choice.baseURL, model: choice.model, label: choice.title)
-        }
-        modelLabel = ResearchSettings.label
+        Button("Model") { showModels = true }
+            .buttonStyle(.chip())
+            .help("Now answering: \(modelLabel). Choose between Apple Intelligence and your own AI.")
     }
 
     private var starters: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 8) {
             Text("Chat about the project, or add a picture to find similar letterforms. AllFontsO only names fonts from your library.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-            ForEach(prompts, id: \.self) { prompt in
-                Button(prompt) {
-                    draft = prompt
-                    send()
+                .font(AppChrome.type())
+                .foregroundStyle(surface.half)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 5) {
+                ForEach(prompts, id: \.self) { prompt in
+                    Button(prompt) {
+                        draft = prompt
+                        send()
+                    }
+                    .buttonStyle(.chip())
+                    .help("Ask this question")
                 }
-                .buttonStyle(.bordered)
-                .help("Ask this question")
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -396,18 +347,19 @@ struct ResearchChatView: View {
 
     private func emphasized(_ text: String) -> AttributedString {
         var piece = AttributedString(text)
-        piece.font = .body.italic()
+        piece.font = AppChrome.type().italic()
         return piece
     }
 
+    /// Your own messages sit on a grey field at the right; the answers run plain across the column.
     @ViewBuilder
     private func messageView(_ message: ResearchMessage) -> some View {
         let isUser = message.role == "user"
-        VStack(alignment: .leading, spacing: 8) {
-            Text(isUser ? "You" : "Research")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-            let pieces = chatPieces(message.text)
+        let pieces = chatPieces(message.text)
+        let content = VStack(alignment: .leading, spacing: 6) {
+            Text(isUser ? "You" : "AllFontsO")
+                .font(AppChrome.small)
+                .foregroundStyle(surface.half)
             if !pieces.chips.isEmpty {
                 FlowChips(titles: pieces.chips)
             }
@@ -416,31 +368,55 @@ struct ResearchChatView: View {
                     .resizable()
                     .scaledToFit()
                     .frame(maxWidth: 280, maxHeight: 160, alignment: .leading)
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .clipShape(RoundedRectangle(cornerRadius: AppChrome.cardRadius, style: .continuous))
             }
             if !pieces.rest.isEmpty {
                 Text(styledResearch(pieces.rest, names: isUser ? [] : message.suggestions.map(\.family)))
+                    .font(AppChrome.type())
+                    .foregroundStyle(surface.ink)
+                    .lineSpacing(2)
                     .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .frame(maxWidth: isUser ? nil : .infinity, alignment: .leading)
             }
             if !message.suggestions.isEmpty {
+                // One card per family, as in the preview: side by side for the fonts you asked about, stacked otherwise.
                 if message.suggestions.allSatisfy({ $0.role == "preview" }) {
-                    HStack(alignment: .top, spacing: 10) {
+                    HStack(alignment: .top, spacing: 8) {
                         ForEach(message.suggestions) { suggestion in
-                            SuggestionCard(suggestion: suggestion, sampleSize: 28, onSelect: select)
+                            fontCard(suggestion, in: message)
                         }
                     }
                 } else {
                     VStack(alignment: .leading, spacing: 8) {
                         ForEach(message.suggestions) { suggestion in
-                            SuggestionCard(suggestion: suggestion, sampleSize: 22, onSelect: select)
+                            fontCard(suggestion, in: message)
                         }
                     }
                 }
             }
         }
-        .padding(12)
-        .background(isUser ? Color.accentColor.opacity(0.12) : Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
+        if isUser {
+            HStack(spacing: 0) {
+                Spacer(minLength: 80)
+                content
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .background(surface.control, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            }
+        } else {
+            content
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func fontCard(_ suggestion: ResearchSuggestion, in message: ResearchMessage) -> some View {
+        let key = "\(message.id)|\(suggestion.id)"
+        return ChatFontCard(
+            suggestion: suggestion,
+            open: openCards.contains(key),
+            onToggle: { openCards.formSymmetricDifference([key]) },
+            onSelect: select
+        )
     }
 
     private var suggestionFaces: [FontFace] {
@@ -478,11 +454,6 @@ struct ResearchChatView: View {
             store.selection = [face.id]
             selectionAnchor = face.id
         }
-    }
-
-    private func dragIdentities(_ family: String) -> [String] {
-        guard let face = store.face(forFamily: family) else { return [] }
-        return [face.identity]
     }
 
     private func copyChat() {
@@ -541,10 +512,18 @@ struct ResearchChatView: View {
             fontDrop = false
             return
         }
+        // A name from the news has no file; it goes in by its name.
+        let outside = items.map(\.outsideName).filter { !$0.isEmpty }
+        if !outside.isEmpty {
+            addChips(outside.joined(separator: ", "))
+            composerOpen = true
+            fontDrop = false
+        }
         insertReferences(items.flatMap(\.identities))
     }
 
     private func insertReferences(_ identities: [String]) {
+        guard !identities.isEmpty else { return }
         let now = Date()
         guard now.timeIntervalSince(lastFontDrop) > 0.3 else { return }
         lastFontDrop = now
@@ -577,24 +556,26 @@ struct ResearchChatView: View {
     }
 
     private func fontChip(_ title: String, onRemove: @escaping () -> Void) -> some View {
-        HStack(spacing: 5) {
-            Image(systemName: title.hasPrefix("Liste ") ? "list.bullet" : "textformat")
-                .font(.caption2.weight(.semibold))
-            Text(title.hasPrefix("Liste ") ? String(title.dropFirst("Liste ".count)) : title)
-                .font(.caption.weight(.medium))
+        HStack(spacing: 4) {
+            Text(title.hasPrefix("Liste ") ? "List: " + String(title.dropFirst("Liste ".count)) : title)
+                .font(AppChrome.small)
+                .foregroundStyle(surface.ink)
                 .lineLimit(1)
             Button(action: onRemove) {
                 Image(systemName: "xmark")
-                    .font(.caption2.weight(.bold))
+                    .font(.system(size: 7, weight: .semibold))
+                    .foregroundStyle(surface.half)
+                    .frame(width: 10, height: 10)
+                    .contentShape(Rectangle())
             }
-            .buttonStyle(.borderless)
+            .buttonStyle(.plain)
             .help("Remove")
         }
-        .padding(.leading, 8)
-        .padding(.trailing, 5)
-        .padding(.vertical, 4)
-        .background(Color.accentColor.opacity(0.16), in: Capsule())
-        .overlay(Capsule().strokeBorder(Color.accentColor.opacity(0.45), lineWidth: 1))
+        .padding(.leading, 6)
+        .padding(.trailing, 4)
+        .padding(.vertical, 2.5)
+        .background(surface.control, in: RoundedRectangle(cornerRadius: 4, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 4, style: .continuous).stroke(surface.stroke, lineWidth: 0.5))
         .help(title)
     }
 
@@ -647,8 +628,9 @@ struct ResearchChatView: View {
 
     private struct PromptEditor: NSViewRepresentable {
         @Binding var text: String
+        var ink: NSColor
         var onSubmit: () -> Void
-        var onFonts: ([String]) -> Void
+        var onFonts: ([FontDragItem]) -> Void
         var onFontHover: (Bool) -> Void
 
         func makeCoordinator() -> Coordinator {
@@ -663,15 +645,17 @@ struct ResearchChatView: View {
             let textView = SubmitTextView()
             textView.isRichText = false
             textView.importsGraphics = false
-            textView.font = .systemFont(ofSize: 16)
+            textView.font = AppChrome.nsFont(13)
+            textView.textColor = ink
+            textView.insertionPointColor = ink
             textView.drawsBackground = false
             textView.isVerticallyResizable = true
             textView.isHorizontallyResizable = false
             textView.autoresizingMask = [.width]
-            textView.textContainerInset = NSSize(width: 8, height: 10)
+            textView.textContainerInset = NSSize(width: 0, height: 2)
+            textView.textContainer?.lineFragmentPadding = 0
             textView.textContainer?.widthTracksTextView = true
             textView.isAutomaticQuoteSubstitutionEnabled = false
-            textView.unregisterDraggedTypes()
             textView.delegate = context.coordinator
             textView.onSubmit = onSubmit
             textView.onFonts = onFonts
@@ -687,6 +671,10 @@ struct ResearchChatView: View {
             textView.onSubmit = onSubmit
             textView.onFonts = onFonts
             textView.onFontHover = onFontHover
+            if textView.textColor != ink {
+                textView.textColor = ink
+                textView.insertionPointColor = ink
+            }
             if textView.string != text {
                 textView.string = text
             }
@@ -695,13 +683,13 @@ struct ResearchChatView: View {
         final class Coordinator: NSObject, NSTextViewDelegate {
             var text: Binding<String>
             var onSubmit: () -> Void
-            var onFonts: ([String]) -> Void
+            var onFonts: ([FontDragItem]) -> Void
             var onFontHover: (Bool) -> Void
 
             init(
                 text: Binding<String>,
                 onSubmit: @escaping () -> Void,
-                onFonts: @escaping ([String]) -> Void,
+                onFonts: @escaping ([FontDragItem]) -> Void,
                 onFontHover: @escaping (Bool) -> Void
             ) {
                 self.text = text
@@ -717,10 +705,51 @@ struct ResearchChatView: View {
         }
     }
 
+    /// The message field. It takes fonts and lists dragged from the navigation itself, as chips above the text;
+    /// a text view left to its own drag types would swallow them.
     private final class SubmitTextView: NSTextView {
         var onSubmit: (() -> Void)?
-        var onFonts: (([String]) -> Void)?
+        var onFonts: (([FontDragItem]) -> Void)?
         var onFontHover: ((Bool) -> Void)?
+        private static let fontType = NSPasteboard.PasteboardType("public.json")
+
+        override var acceptableDragTypes: [NSPasteboard.PasteboardType] { [SubmitTextView.fontType] }
+
+        override func updateDragTypeRegistration() {
+            unregisterDraggedTypes()
+            registerForDraggedTypes([SubmitTextView.fontType])
+        }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            updateDragTypeRegistration()
+        }
+
+        override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+            onFontHover?(true)
+            return .copy
+        }
+
+        override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation { .copy }
+
+        override func draggingExited(_ sender: NSDraggingInfo?) {
+            onFontHover?(false)
+        }
+
+        override func prepareForDragOperation(_ sender: NSDraggingInfo) -> Bool { true }
+
+        override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+            onFontHover?(false)
+            let decoder = JSONDecoder()
+            let items = (sender.draggingPasteboard.pasteboardItems ?? []).compactMap { entry in
+                entry.data(forType: SubmitTextView.fontType).flatMap { try? decoder.decode(FontDragItem.self, from: $0) }
+            }
+            guard !items.isEmpty else { return false }
+            onFonts?(items)
+            return true
+        }
+
+        override func concludeDragOperation(_ sender: NSDraggingInfo?) {}
 
         override func keyDown(with event: NSEvent) {
             let isReturn = event.keyCode == 36 || event.keyCode == 76
@@ -741,137 +770,221 @@ struct ResearchChatView: View {
     }
 }
 
-private struct SuggestionCard: View {
+/// One suggested family in the chat, built like a card of the preview: a header with the name and the buttons,
+/// then the sample text. A family with several cuts unfolds into one slice per cut.
+private struct ChatFontCard: View {
     @Environment(LibraryStore.self) private var store
-    @AppStorage("fontso.sampleText") private var listSample = SpecimenText.standard
+    @Environment(\.surface) private var surface
+    @AppStorage("fontso.sampleText") private var sample = SpecimenText.standard
+    @AppStorage("fontso.specimenSize") private var specimenSize = 48.0
+    @AppStorage("fontso.specimen.tracking") private var tracking = 0.0
     var suggestion: ResearchSuggestion
-    var sampleSize: CGFloat
+    var open: Bool
+    var onToggle: () -> Void
     var onSelect: (FontFace) -> Void
-    @State private var expanded = false
 
-    private var face: FontFace? {
+    /// The cut the answer means: the one its note names, else the family's regular.
+    private var lead: FontFace? {
         suggestion.reason.isEmpty
             ? store.face(forFamily: suggestion.family)
             : store.face(forFamily: suggestion.family, matching: suggestion.reason)
     }
 
-    private var cuts: [FontFace] {
-        store.cuts(in: suggestion.family)
-    }
-
-    private var detail: String {
-        var parts: [String] = []
-        if let category = face?.category, category != .unclassified {
-            parts.append(category.rawValue)
-        }
-        if !suggestion.reason.isEmpty {
-            parts.append(suggestion.reason)
-        } else if cuts.count == 1 {
-            parts.append(cuts[0].style)
-        } else {
-            parts.append(cuts.count == 1 ? "1 style" : "\(cuts.count) styles")
-        }
-        return parts.joined(separator: " · ")
-    }
-
-    private var formats: String {
-        let names = Array(Set(cuts.map { $0.format.uppercased() })).sorted()
-        if names.count <= 1 { return names.first ?? face?.format.uppercased() ?? "" }
-        if names.count <= 3 { return names.joined(separator: " · ") }
-        return "Mixed"
-    }
-
     var body: some View {
-        let selected = face.map { store.selection.contains($0.id) } ?? false
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(alignment: .top, spacing: 6) {
-                Circle()
-                    .fill((face?.activation.isAvailableToApps ?? false) ? Color.green : Color.clear)
-                    .overlay(Circle().stroke((face?.activation.isAvailableToApps ?? false) ? Color.green : Color.secondary.opacity(0.55), lineWidth: 1))
-                    .frame(width: 8, height: 8)
-                    .padding(.top, 4)
-                VStack(alignment: .leading, spacing: 1) {
-                    HStack(spacing: 6) {
-                        Text(suggestion.family)
-                            .lineLimit(1)
-                            .layoutPriority(1)
-                        Text(detail)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
+        let shape = RoundedRectangle(cornerRadius: AppChrome.cardRadius, style: .continuous)
+        VStack(alignment: .leading, spacing: 0) {
+            if let lead {
+                let cuts = store.cuts(in: lead.family)
+                let family = cuts.contains(where: { $0.id == lead.id }) ? cuts : [lead]
+                let folded = family.count > 1 && !open
+                ForEach(Array((folded ? [lead] : family).enumerated()), id: \.element.id) { index, cut in
+                    if index > 0 {
+                        Rectangle().fill(surface.stroke).frame(height: 0.5)
                     }
-                    if let face, !listSample.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        FamilySample(face: face, text: listSample, size: min(sampleSize, 16))
-                    }
+                    slice(cut, family: family, folded: folded, leads: index == 0)
                 }
-                Spacer(minLength: 8)
-                if face?.isVariable == true {
-                    Text("VAR")
-                        .font(.caption2.weight(.semibold))
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(Color.accentColor.opacity(0.14), in: Capsule())
-                }
-                Text(formats)
-                    .font(.caption2.weight(.medium))
-                    .foregroundStyle(.secondary)
-            }
-            if cuts.count > 1 {
-                Button {
-                    expanded.toggle()
-                } label: {
-                    Label(expanded ? "Hide styles" : "Show styles", systemImage: expanded ? "chevron.down" : "chevron.right")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-                .help("Show or hide every style of this family")
-                if expanded {
-                    VStack(alignment: .leading, spacing: 2) {
-                        ForEach(cuts) { cut in
-                            HStack {
-                                Button(cut.style) { onSelect(cut) }
-                                    .buttonStyle(.plain)
-                                    .lineLimit(1)
-                                    .help("Use this style")
-                                Spacer(minLength: 8)
-                                Text(cut.format.uppercased())
-                                    .font(.caption2.weight(.medium))
-                                    .foregroundStyle(.secondary)
-                            }
-                            .padding(.leading, 18)
-                            .contextMenu { addMenu(identities: [cut.identity]) }
-                        }
-                    }
-                }
+            } else {
+                missing
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.vertical, 4)
-        .padding(.horizontal, 8)
-        .background(selected ? Color.accentColor.opacity(0.16) : Color.clear, in: RoundedRectangle(cornerRadius: 8))
-        .contentShape(Rectangle())
-        .onTapGesture {
-            if let face { onSelect(face) }
+        .clipShape(shape)
+        .overlay(shape.stroke(surface.stroke, lineWidth: 0.5))
+    }
+
+    /// A name the answer gave that the library does not hold.
+    private var missing: some View {
+        HStack(spacing: 6) {
+            Text(suggestion.family)
+                .font(AppChrome.type(AppChrome.smallSize + 1, weight: .medium))
+                .foregroundStyle(surface.ink)
+                .lineLimit(1)
+            Text("Not in your library")
+                .font(AppChrome.small)
+                .foregroundStyle(surface.half)
+            Spacer(minLength: 0)
         }
-        .draggable(FontDragItem(identities: face.map { [$0.identity] } ?? []))
-        .help("Click to preview. Command-click adds another font, Shift-click selects a range.")
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+    }
+
+    private func slice(_ face: FontFace, family: [FontFace], folded: Bool, leads: Bool) -> some View {
+        let selected = store.selection.contains(face.id)
+        let note = suggestion.reason.trimmingCharacters(in: .whitespacesAndNewlines)
+        return VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 6) {
+                if family.count > 1 {
+                    if leads {
+                        Button(action: onToggle) {
+                            ChromeChevron(open: open, color: surface.ink)
+                        }
+                        .buttonStyle(.plain)
+                        .help(open ? "Fold \(face.family) to one sample" : "Show all \(family.count) styles of \(face.family)")
+                    } else {
+                        Color.clear.frame(width: 10, height: 12)
+                    }
+                }
+                Text(face.family)
+                    .font(AppChrome.type(AppChrome.smallSize + 1, weight: .medium))
+                    .foregroundStyle(surface.ink)
+                    .lineLimit(1)
+                    .layoutPriority(1)
+                Text(folded ? foldedLabel(face, styles: family.count) : "\(face.style), \(face.format.uppercased())")
+                    .font(AppChrome.small)
+                    .foregroundStyle(surface.half)
+                    .lineLimit(1)
+                if leads, !note.isEmpty, note.caseInsensitiveCompare(face.style) != .orderedSame {
+                    Text(note)
+                        .font(AppChrome.small)
+                        .foregroundStyle(surface.muted)
+                        .lineLimit(1)
+                        .layoutPriority(-1)
+                }
+                if face.isVariable {
+                    Text("VAR")
+                        .font(AppChrome.type(9, weight: .medium))
+                        .foregroundStyle(surface.ink.opacity(0.7))
+                        .help("Variable font")
+                }
+                Spacer(minLength: 8)
+                Button("Info") {
+                    onSelect(face)
+                    store.infoPanelOpen = true
+                }
+                .buttonStyle(.chip(on: selected))
+                .help(selected ? "Selected: its Info shows under the navigation" : "Select this cut and show its Info under the navigation")
+                if folded {
+                    activateAllButton(family)
+                    pinAllButton(family)
+                } else {
+                    activationButton(face)
+                    IconChip(symbol: "plus.rectangle.on.rectangle", help: "To Playground: add this font as a new text block") {
+                        store.addToPlayground([face.identity])
+                    }
+                    IconChip(
+                        symbol: store.isPinned(face) ? "pin.fill" : "pin",
+                        on: store.isPinned(face),
+                        help: store.isPinned(face) ? "Pinned for Compare, Shape, and Playground. Click to unpin." : "Pin this font for Compare, Shape, and Playground"
+                    ) {
+                        store.togglePin(face)
+                    }
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.top, 7)
+            .padding(.bottom, 2)
+            sampleText(face)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background {
+            Rectangle().fill(selected ? surface.selection : Color.clear)
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { onSelect(face) }
+        .draggable(FontDragItem(identities: folded ? family.map(\.identity) : [face.identity]))
+        .help("Click to select it and see its Info. Command-click adds another font, Shift-click selects a range. Drag it onto a list, Pinned, or a mode of the preview.")
         .contextMenu {
-            if let face {
-                addMenu(identities: [face.identity])
+            Menu(folded ? "Add this family to list" : "Add this cut to list") {
+                if store.groups.isEmpty {
+                    Button("New list…") { store.showNewGroup = true }
+                }
+                ForEach(store.menuGroups) { group in
+                    Button(store.menuTitle(group)) {
+                        store.addToGroup(group.id, identities: folded ? family.map(\.identity) : [face.identity])
+                    }
+                }
             }
         }
     }
 
+    /// The sample text of the preview, in this cut. It follows the text and spacing set there, at a size that
+    /// lets several cards share the chat.
     @ViewBuilder
-    private func addMenu(identities: [String]) -> some View {
-        Menu("Add this cut") {
-            if store.groups.isEmpty {
-                Button("New list…") { store.showNewGroup = true }
+    private func sampleText(_ face: FontFace) -> some View {
+        let size = min(max(specimenSize, 14), 32)
+        let text = sample.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !text.isEmpty,
+           let font = SpecimenFont.make(path: face.filePath, index: face.faceIndex, size: size, variations: store.axisValues[face.id] ?? [:]) {
+            Text(text)
+                .font(Font(font as CTFont))
+                .tracking(tracking * size)
+                .foregroundStyle(surface.ink)
+                .lineLimit(3)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 12)
+                .padding(.top, 6)
+                .padding(.bottom, 12)
+        } else {
+            Color.clear.frame(height: 6)
+        }
+    }
+
+    private func foldedLabel(_ face: FontFace, styles: Int) -> String {
+        let category = face.category == .unclassified ? "" : "\(face.category.rawValue), "
+        return "\(category)\(styles) Styles"
+    }
+
+    private func activationButton(_ face: FontFace) -> some View {
+        let active = face.activation.isAvailableToApps
+        let title = active ? (face.canDeactivate ? "Active" : face.activation.label) : "Activate"
+        return Button(title) {
+            store.toggle(face)
+        }
+        .buttonStyle(.chip(on: active))
+        .disabled(!face.canActivate && !face.canDeactivate)
+        .help(active
+            ? (face.canDeactivate ? "This cut is active. Click to deactivate it." : "This cut is already available to other apps.")
+            : "Activate this file so other apps can use it.")
+    }
+
+    private func activateAllButton(_ faces: [FontFace]) -> some View {
+        let active = faces.allSatisfy { $0.activation.isAvailableToApps }
+        return Button(active ? "All active" : "Activate all") {
+            if active {
+                store.deactivate(paths: Array(Set(faces.filter(\.canDeactivate).map(\.filePath))))
+            } else {
+                store.activate(paths: Array(Set(faces.filter(\.canActivate).map(\.filePath))))
             }
-            ForEach(store.menuGroups) { group in
-                Button(store.menuTitle(group)) {
-                    store.addToGroup(group.id, identities: identities)
+        }
+        .buttonStyle(.chip(on: active))
+        .disabled(!faces.contains { active ? $0.canDeactivate : $0.canActivate })
+        .help(active ? "Every style is available to other apps. Click to deactivate them." : "Activate all \(faces.count) styles so other apps can use them")
+    }
+
+    private func pinAllButton(_ faces: [FontFace]) -> some View {
+        let pinned = faces.allSatisfy { store.isPinned($0) }
+        return IconChip(
+            symbol: pinned ? "pin.fill" : "pin",
+            on: pinned,
+            help: pinned ? "Every style of this family is pinned. Click to unpin them." : "Pin all \(faces.count) styles for Compare, Shape, and Playground"
+        ) {
+            if pinned {
+                let identities = Set(faces.map(\.identity))
+                store.pinnedIdentities.removeAll { identities.contains($0) }
+            } else {
+                for face in faces where !store.isPinned(face) {
+                    store.togglePin(face)
                 }
             }
         }
@@ -881,236 +994,178 @@ private struct SuggestionCard: View {
 /// Takes the place of the chat while another program drives AllFontsO over MCP.
 struct ResearchHandledByMCPView: View {
     @Environment(LibraryStore.self) private var store
+    @Environment(\.surface) private var surface
     @State private var showModels = false
 
     var body: some View {
-        VStack(spacing: 14) {
-            Image(systemName: "point.3.connected.trianglepath.dotted")
-                .font(.system(size: 40, weight: .light))
-                .foregroundStyle(.secondary)
-            Text("Chat – handled by your own AI")
-                .font(.title3.weight(.semibold))
-            Text("MCP is on, so your own AI program drives AllFontsO. Ask it to search, show, activate, or list fonts; the results appear here in the library. Chats inside AllFontsO rest until you switch MCP off.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Your own AI answers")
+                .font(AppChrome.type(12, weight: .medium))
+                .foregroundStyle(surface.ink)
+            Text("Your own AI program drives AllFontsO over MCP. Ask it to search, show, activate, or list fonts; the results appear here in the library. The chats inside AllFontsO rest until you go back to Apple Intelligence.")
+                .font(AppChrome.type())
+                .foregroundStyle(surface.half)
                 .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: 420)
-            if let port = store.mcpPort {
-                Text(MCPSettings.endpoint(port: port))
-                    .font(.system(.caption, design: .monospaced))
-                    .textSelection(.enabled)
-                    .foregroundStyle(.secondary)
-            } else if let error = store.mcpError {
+            if let error = store.mcpError {
                 Text(error)
-                    .font(.caption)
-                    .foregroundStyle(.red)
+                    .font(AppChrome.type())
+                    .foregroundStyle(surface.ink)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if let port = store.mcpPort {
+                Text(MCPSettings.endpoint(port: port))
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(surface.half)
+                    .textSelection(.enabled)
             }
-            HStack(spacing: 10) {
-                Button("Configuration…") { showModels = true }
-                    .help("Choose the AI that answers Research")
-                Button("Switch MCP off") { store.setMCPEnabled(false) }
-                    .help("Stop letting other apps control AllFontsO")
+            HStack(spacing: 5) {
+                Button("Model") { showModels = true }
+                    .help("See how to connect your AI program, or choose Apple Intelligence")
+                Button("Back to Apple Intelligence") { store.setMCPEnabled(false) }
+                    .help("Stop letting other programs drive AllFontsO and chat inside AllFontsO again")
             }
+            .buttonStyle(.chip())
+            .padding(.top, 4)
         }
-        .padding(32)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(16)
+        .frame(maxWidth: 480, alignment: .leading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .sheet(isPresented: $showModels) {
             ResearchModelSheet()
         }
     }
 }
 
+/// Who answers: Apple Intelligence inside AllFontsO, or a program of your own that drives AllFontsO over MCP.
+/// The one chosen is a filled button; the sheet keeps the colours of the theme.
 struct ResearchModelSheet: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(LibraryStore.self) private var store
-    @State private var choices: [ResearchChoice] = []
-    @State private var discovered = false
-    @State private var claudeModel = ResearchSettings.kind == "anthropic" && !ResearchSettings.model.isEmpty
-        ? ResearchSettings.model
-        : "claude-haiku-4-5"
-    @State private var claudeKey = ""
-    @State private var claudeWorkspace = ResearchSettings.workspaceID
-    @State private var hasStoredKey = false
-    @State private var customURL = "http://127.0.0.1:11434/v1"
-    @State private var customModel = ""
-    @State private var customKey = ""
+    @State private var copied = ""
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                sheetContent
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Model")
+                .font(AppChrome.type(13, weight: .medium))
+                .foregroundStyle(AppChrome.ink)
+                .padding(.bottom, 2)
+            HStack(alignment: .firstTextBaseline, spacing: 5) {
+                Text("Answers")
+                    .foregroundStyle(AppChrome.half)
+                    .frame(width: 78, alignment: .leading)
+                choice("Apple Intelligence", on: !store.mcpEnabled, help: "Chat inside AllFontsO, answered on this Mac") {
+                    ResearchSettings.useApple()
+                    store.setMCPEnabled(false)
+                }
+                choice("Your own AI", on: store.mcpEnabled, help: "Let a program of your own, such as Claude Desktop, drive AllFontsO over MCP") {
+                    store.setMCPEnabled(true)
+                }
+                Spacer(minLength: 0)
             }
-            .padding(20)
+            if store.mcpEnabled {
+                ownAI
+            } else {
+                appleIntelligence
+            }
+            Rectangle()
+                .fill(AppChrome.hairline)
+                .frame(height: 0.5)
+                .padding(.top, 2)
+            HStack(spacing: 6) {
+                Text(store.mcpEnabled ? "Your own AI, over MCP" : "Apple Intelligence, on this Mac")
+                    .font(AppChrome.small)
+                    .foregroundStyle(AppChrome.half)
+                    .lineLimit(1)
+                Spacer(minLength: 8)
+                Button("Done") { dismiss() }
+                    .buttonStyle(.paperProminent)
+                    .keyboardShortcut(.defaultAction)
+                    .help("Close")
+            }
         }
-        .frame(width: 480, height: 640)
-        .task {
-            hasStoredKey = !ResearchKeychain.load().isEmpty
-            choices = await ResearchConnection.discover()
-            discovered = true
+        .font(AppChrome.type(11))
+        .padding(18)
+        .frame(width: 470)
+        .modifier(ChromeSheet())
+    }
+
+    @ViewBuilder
+    private var appleIntelligence: some View {
+        note("The chat inside AllFontsO is answered by Apple Intelligence, on this Mac. It needs no account and no key, and nothing leaves the Mac.")
+        if let reason = ResearchAssistant.unavailableReason() {
+            Text(reason)
+                .foregroundStyle(AppChrome.ink)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.leading, 83)
         }
     }
 
     @ViewBuilder
-    private var sheetContent: some View {
-            Text("Model")
-                .font(.title2.weight(.semibold))
-            Text("Free, on this Mac")
-                .font(.headline)
-            Text("These run without an account, key, or any connection. Apple Intelligence is built into macOS 26. Ollama and LM Studio are free apps that run open models locally; AllFontsO finds them when they are running.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
+    private var ownAI: some View {
+        note("A program of your own drives AllFontsO over MCP: it searches the library, shows fonts, activates them, and fills lists. AllFontsO answers only on this Mac and writes nothing into other programs. Meanwhile the chats inside AllFontsO rest.")
+        if let error = store.mcpError {
+            Text(error)
+                .foregroundStyle(AppChrome.ink)
                 .fixedSize(horizontal: false, vertical: true)
-            if !discovered {
-                ProgressView()
-            } else if choices.isEmpty {
-                Text("Nothing found right now. Start Ollama or LM Studio, or turn on Apple Intelligence in System Settings.")
-                    .font(.callout)
-            } else {
-                HStack(spacing: 8) {
-                    ForEach(choices) { choice in
-                        Button(choice.title) {
-                            apply(choice)
-                        }
-                        .buttonStyle(.bordered)
-                        .help("Answer with this model")
-                    }
-                }
-            }
-            HStack {
-                Button("Get Ollama") { open("https://ollama.com/download") }
-                    .help("Open the Ollama download page")
-                Button("Get LM Studio") { open("https://lmstudio.ai") }
-                    .help("Open the LM Studio website")
-            }
-            Divider()
-            Text("Your own AI")
-                .font(.headline)
-            Text("Lets a program of your choice drive AllFontsO over MCP: search the library, show fonts, activate them, and fill lists. Switched off until you turn it on. AllFontsO only answers on this Mac and writes nothing into other apps; paste the configuration into your AI program yourself.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            Toggle("Allow other apps to control AllFontsO (MCP)", isOn: Binding(
-                get: { store.mcpEnabled },
-                set: { store.setMCPEnabled($0) }
-            ))
-            .toggleStyle(.switch)
-            .help("Lets your own AI agent search and organise the library through MCP. Off by default.")
-            if store.mcpEnabled {
-                if let error = store.mcpError {
-                    Text(error)
-                        .font(.caption)
-                        .foregroundStyle(.red)
-                } else if let port = store.mcpPort {
-                    mcpBlock(
-                        title: "Address for programs that connect over HTTP",
-                        text: MCPSettings.endpoint(port: port)
-                    )
-                }
-                mcpBlock(
-                    title: "Configuration for Claude Desktop, Cursor, and other stdio clients",
-                    text: MCPSettings.stdioConfiguration()
+                .padding(.leading, 83)
+        } else {
+            block(
+                "Claude Desktop",
+                detail: "Also with the free plan. In Claude Desktop open Settings › Developer › Edit Config, paste this into the file, and start Claude again. A file that already lists servers takes the allfontso entry beside them.",
+                text: MCPSettings.stdioConfiguration()
+            )
+            if let port = store.mcpPort {
+                block(
+                    "By address",
+                    detail: "For programs on this Mac that connect to an MCP address.",
+                    text: MCPSettings.endpoint(port: port)
                 )
-                Text("Keep AllFontsO open while your AI uses it.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
-            Divider()
-            Text("Claude API")
-                .font(.headline)
-            Text("A Claude chat subscription does not work here. Buy API credits, create a key, and paste it below. The key starts with sk-ant- and is shown only once.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            HStack {
-                Button("Buy credits") { open("https://platform.claude.com/settings/billing") }
-                    .help("Open Claude billing in the browser")
-                Button("Create API key") { open("https://platform.claude.com/settings/keys") }
-                    .help("Open Claude API keys in the browser")
-                Button("Workspaces") { open("https://platform.claude.com/settings/workspaces") }
-                    .help("Open Claude workspaces in the browser")
-            }
-            Picker("Model", selection: $claudeModel) {
-                Text("Haiku").tag("claude-haiku-4-5")
-                Text("Sonnet").tag("claude-sonnet-4-5")
-            }
-            .pickerStyle(.segmented)
-            .help("The Claude model that answers")
-            SecureField("API key", text: $claudeKey, prompt: Text("sk-ant-…"))
-                .textFieldStyle(.roundedBorder)
-            TextField("Workspace ID", text: $claudeWorkspace, prompt: Text("wrkspc_…"))
-                .textFieldStyle(.roundedBorder)
-            Text("Needed when the key is not limited to one workspace. Copy the ID from Workspaces.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            Button("Use Claude") {
-                let typed = claudeKey.cleanedFontName
-                if !typed.isEmpty { ResearchKeychain.save(typed) }
-                let model = claudeModel.cleanedFontName.isEmpty ? "claude-haiku-4-5" : claudeModel.cleanedFontName
-                ResearchSettings.useAnthropic(model: model, workspaceID: claudeWorkspace.cleanedFontName)
-                dismiss()
-            }
-            .disabled(claudeKey.cleanedFontName.isEmpty && !hasStoredKey)
-            .help("Answer Research with Claude and this key")
-            Divider()
-            Text("Other OpenAI-compatible server")
-                .font(.headline)
-            TextField("Address", text: $customURL)
-                .textFieldStyle(.roundedBorder)
-            TextField("Model name", text: $customModel)
-                .textFieldStyle(.roundedBorder)
-            SecureField("API key, if the server asks for one", text: $customKey)
-                .textFieldStyle(.roundedBorder)
-            Button("Use this server") {
-                if !customKey.isEmpty { ResearchKeychain.save(customKey) }
-                ResearchSettings.useCompatible(
-                    baseURL: customURL.cleanedFontName,
-                    model: customModel.cleanedFontName,
-                    label: customModel.cleanedFontName.isEmpty ? customURL : customModel.cleanedFontName
-                )
-                dismiss()
-            }
-            .disabled(customURL.cleanedFontName.isEmpty || customModel.cleanedFontName.isEmpty)
-            .help("Answer Research with this server")
-            HStack {
-                Spacer()
-                Button("Close") { dismiss() }
-                    .help("Close the settings")
-            }
+            note("Keep AllFontsO open while your AI uses it.")
+        }
     }
 
-    private func mcpBlock(title: String, text: String) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
+    private func choice(_ title: String, on: Bool, help: String, action: @escaping () -> Void) -> some View {
+        Button(title, action: action)
+            .buttonStyle(PaperButtonStyle(prominent: on))
+            .help(help)
+    }
+
+    private func note(_ text: String) -> some View {
+        Text(text)
+            .font(AppChrome.small)
+            .foregroundStyle(AppChrome.half)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.leading, 83)
+    }
+
+    /// A piece of configuration to copy: what it is for at the left, the text itself on a grey field.
+    private func block(_ title: String, detail: String, text: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 5) {
             Text(title)
-                .font(.caption.weight(.medium))
-            HStack(alignment: .top, spacing: 8) {
+                .foregroundStyle(AppChrome.half)
+                .frame(width: 78, alignment: .leading)
+            VStack(alignment: .leading, spacing: 5) {
+                Text(detail)
+                    .font(AppChrome.small)
+                    .foregroundStyle(AppChrome.half)
+                    .fixedSize(horizontal: false, vertical: true)
                 Text(text)
-                    .font(.system(.caption, design: .monospaced))
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(AppChrome.ink)
                     .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(8)
-                    .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
-                Button("Copy") {
+                    .padding(7)
+                    .background(AppChrome.control, in: RoundedRectangle(cornerRadius: 4, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 4, style: .continuous).stroke(AppChrome.ink.opacity(0.22), lineWidth: 0.5))
+                Button(copied == text ? "Copied" : "Copy") {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(text, forType: .string)
+                    copied = text
                 }
+                .buttonStyle(.paper)
                 .help("Copy this to the clipboard")
             }
         }
-    }
-
-    private func open(_ address: String) {
-        guard let url = URL(string: address) else { return }
-        NSWorkspace.shared.open(url)
-    }
-
-    private func apply(_ choice: ResearchChoice) {
-        if choice.kind == "apple" {
-            ResearchSettings.useApple()
-        } else {
-            ResearchSettings.useCompatible(baseURL: choice.baseURL, model: choice.model, label: choice.title)
-        }
-        dismiss()
     }
 }

@@ -31,7 +31,7 @@ struct SampleDock: View {
                         isOpen = true
                     } label: {
                         Label("Sample", systemImage: "textformat")
-                            .font(.caption.weight(.semibold))
+                            .font(.uiCaption.weight(.semibold))
                             .padding(.horizontal, 12)
                             .padding(.vertical, 8)
                     }
@@ -63,7 +63,7 @@ struct SampleDock: View {
     private var card: some View {
         HStack(alignment: .top, spacing: 8) {
             TextEditor(text: $sample)
-                .font(.body)
+                .font(.uiBody)
                 .scrollContentBackground(.hidden)
                 .scrollIndicators(.never)
                 .frame(minHeight: 22, maxHeight: 84)
@@ -111,14 +111,14 @@ struct SampleDock: View {
                 isOpen = false
             } label: {
                 Image(systemName: "chevron.down")
-                    .font(.caption.weight(.semibold))
+                    .font(.uiCaption.weight(.semibold))
             }
             .buttonStyle(.borderless)
             .help("Hide the sample text")
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
-        .font(.callout)
+        .font(.uiCallout)
     }
 
     private func applySample(_ choice: SampleChoice) {

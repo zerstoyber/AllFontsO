@@ -22,7 +22,10 @@ bin="$root/.build/universal"
 iconset="$root/Support/AppIcon.iconset"
 rm -rf "$iconset"
 mkdir -p "$iconset"
-src="$root/Support/AppIcon.png"
+# The artwork fills its canvas; the system wants it inside the icon grid, or it shows it small in a grey frame.
+swiftc -O "$root/scripts/icon-grid.swift" -o "$root/.build/icon-grid" 2>/dev/null
+src="$root/.build/AppIcon-grid.png"
+"$root/.build/icon-grid" "$root/Support/AppIcon.png" "$src"
 sips -s format png -z 16 16 "$src" --out "$iconset/icon_16x16.png" >/dev/null
 sips -s format png -z 32 32 "$src" --out "$iconset/icon_16x16@2x.png" >/dev/null
 sips -s format png -z 32 32 "$src" --out "$iconset/icon_32x32.png" >/dev/null

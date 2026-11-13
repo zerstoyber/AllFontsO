@@ -51,6 +51,8 @@ struct MixEditor: NSViewRepresentable {
     @Binding var measuredHeight: CGFloat
     var onEdit: (NSRange, Int) -> Void = { _, _ in }
     var onSelect: (NSRange) -> Void = { _ in }
+    /// A click into the text, before the cursor moves there.
+    var onClick: () -> Void = {}
     /// A font dropped on the text, with the offset of the letter under it (nil off the letters).
     var onDropFont: ([String], Int?) -> Void = { _, _ in }
 
@@ -79,6 +81,7 @@ struct MixEditor: NSViewRepresentable {
     func updateNSView(_ textView: MixTextView, context: Context) {
         context.coordinator.parent = self
         textView.onDropFont = onDropFont
+        textView.onClick = onClick
         if textView.string != text {
             let selected = textView.selectedRanges
             textView.string = text
@@ -174,6 +177,7 @@ struct MixEditor: NSViewRepresentable {
 /// (or to the whole selection when dropped inside it) instead of being inserted as text.
 final class MixTextView: NSTextView {
     var onDropFont: ([String], Int?) -> Void = { _, _ in }
+    var onClick: () -> Void = {}
     private static let fontType = NSPasteboard.PasteboardType("public.json")
 
     init() {
@@ -197,6 +201,11 @@ final class MixTextView: NSTextView {
     }
 
     override var acceptableDragTypes: [NSPasteboard.PasteboardType] { [MixTextView.fontType] }
+
+    override func mouseDown(with event: NSEvent) {
+        onClick()
+        super.mouseDown(with: event)
+    }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()

@@ -23,6 +23,98 @@ private struct LibrarySnapshot: Sendable {
     var notices: [FoundryNotice]
 }
 
+/// One license of a cut: the project it is used in and, when the license has one, its last day.
+struct FontLicense: Hashable, Identifiable {
+    var project: String
+    var until: Date?
+    var id: String { project }
+
+    /// The last day has passed.
+    var expired: Bool {
+        guard let until else { return false }
+        return until < Calendar.current.startOfDay(for: Date())
+    }
+
+    static let day: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .none
+        return formatter
+    }()
+}
+
+/// The licenses of a font in a few words, for the tag beside its name.
+struct LicenseNote: Equatable {
+    var text: String
+    /// The same without the word License, for a place that already says it.
+    var short: String
+    var expired: Bool
+    /// Every project with its end date, one to a line.
+    var help: String
+}
+
+enum WorkspaceTab: String, CaseIterable, Identifiable {
+    case preview, compare, shape, playground
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .preview: return "Preview"
+        case .compare: return "Compare"
+        case .shape: return "Shape"
+        case .playground: return "Playground"
+        }
+    }
+
+    var help: String {
+        switch self {
+        case .preview: return "The clicked list or library view, every font stacked"
+        case .compare: return "Align and Overlay using pinned fonts"
+        case .shape: return "Find fonts by proportion, or mix the pinned cuts letter by letter"
+        case .playground: return "Free page of text blocks"
+        }
+    }
+}
+
+enum CompareMode: String, CaseIterable, Identifiable {
+    case align, overlay
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .align: return "Align"
+        case .overlay: return "Overlay"
+        }
+    }
+
+    var help: String {
+        switch self {
+        case .align: return "The pinned fonts side by side on one baseline, to compare x-height and cap height"
+        case .overlay: return "The pinned fonts laid over each other, each in its own colour"
+        }
+    }
+}
+
+/// What Shape shows under the pinned fonts.
+enum ShapeMode: String, CaseIterable, Identifiable {
+    case match, mix
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .match: return "Match"
+        case .mix: return "Mix"
+        }
+    }
+
+    var help: String {
+        switch self {
+        case .match: return "The library ranked by how close each family comes to the reference"
+        case .mix: return "The sample text with every letter in its own cut"
+        }
+    }
+}
+
 @MainActor
 @Observable
 final class LibraryStore {
@@ -45,8 +137,21 @@ final class LibraryStore {
     var onlyVariable = false { didSet { listRevision += 1 } }
     var onlyLicensed = false { didSet { listRevision += 1 } }
     var formatFilter = FormatFilter.any { didSet { listRevision += 1 } }
-    /// Project each cut is licensed for, keyed by face identity. Cuts without an entry count as unlicensed.
-    var licenses: [String: String] = [:] { didSet { touchLibrary() } }
+    /// The licenses of each cut, keyed by face identity: one for every project it is used in. Cuts without an
+    /// entry count as unlicensed.
+    var licenses: [String: [FontLicense]] = [:] { didSet { touchLibrary() } }
+    /// The axis values set by hand for a variable font, by cut. Each font keeps its own; nothing here means the
+    /// values of the named instance.
+    var axisValues: [Int64: [UInt32: Double]] = [:]
+
+    func setAxis(_ tag: UInt32, to value: Double?, for face: FontFace) {
+        var values = axisValues[face.id] ?? [:]
+        values[tag] = value
+        axisValues[face.id] = values.isEmpty ? nil : values
+    }
+
+    /// A font from the news that was clicked under a list in the navigation, shown once that list has opened.
+    @ObservationIgnored var pendingOutside: OutsideFont?
     private(set) var countFamilies = UserDefaults.standard.object(forKey: "fontso.countFamilies") as? Bool ?? true
     @ObservationIgnored private var librarySort: LibrarySort = .automatic
     var searchFocusToken = 0
@@ -83,6 +188,22 @@ final class LibraryStore {
     var statusText = ""
     var alertMessage: String?
     var previewExpanded = false
+    /// Right-hand workspace: Preview shows the clicked source; Compare / Shape / Playground use pinned fonts.
+    var workspaceTab: WorkspaceTab = WorkspaceTab(rawValue: UserDefaults.standard.string(forKey: "fontso.workspaceTab") ?? "") ?? .preview {
+        didSet { UserDefaults.standard.set(workspaceTab.rawValue, forKey: "fontso.workspaceTab") }
+    }
+    var compareMode: CompareMode = CompareMode(rawValue: UserDefaults.standard.string(forKey: "fontso.compareMode") ?? "") ?? .align {
+        didSet { UserDefaults.standard.set(compareMode.rawValue, forKey: "fontso.compareMode") }
+    }
+    var shapeMode: ShapeMode = ShapeMode(rawValue: UserDefaults.standard.string(forKey: "fontso.shapeMode") ?? "") ?? .match {
+        didSet { UserDefaults.standard.set(shapeMode.rawValue, forKey: "fontso.shapeMode") }
+    }
+    /// Scroll the stacked preview to this face after a click in the sidebar.
+    var focusPreviewID: Int64?
+    /// Lists whose member fonts are shown under the list row.
+    var expandedFontLists: Set<Int64> = []
+    /// Library views and source folders whose families are shown under their row.
+    var expandedViews: Set<LibraryFilter> = []
     var folderPendingRemoval: FontFolder?
     var researchChats: [ResearchChat] = []
     var shapeSearches: [ShapeSearch] = []
@@ -96,6 +217,19 @@ final class LibraryStore {
     @ObservationIgnored private var resolvingPages: Set<String> = []
     var isIndexingFoundries = false
     var isReadingFoundries = false
+    /// True while the followed foundries are read again for new names.
+    var isCheckingNews = false
+    /// When each followed foundry was last read, by host. Kept with the library, so it holds across launches.
+    var foundryReadAt: [String: Date] = [:]
+    /// Which way of reading each foundry was last read with. It counts up when AllFontsO learns to read sites
+    /// more closely, so the names that turn up then are not taken for news.
+    @ObservationIgnored private var foundryReader: [String: Int] = [:]
+    private static let foundryReaderVersion = 2
+    @ObservationIgnored private var foundryTriedAt: [String: Date] = [:]
+    @ObservationIgnored private var newsTask: Task<Void, Never>?
+    @ObservationIgnored private var newsTimer: Timer?
+    /// A followed foundry is read again once its last reading is this old.
+    static let newsInterval: TimeInterval = 6 * 60 * 60
     var foundryIndexNote = ""
     var showFoundries = false
     var showReview = false
@@ -174,6 +308,7 @@ final class LibraryStore {
             foundries = snapshot.foundries.sorted(by: foundryOrder)
             foundryFaces = snapshot.faces
             notices = snapshot.notices
+            loadFoundryReadTimes()
             try reloadCollections()
             try importLegacyCompare()
             touchLibrary()
@@ -282,37 +417,115 @@ final class LibraryStore {
 
     // MARK: - Licenses
 
+    /// The licenses of a cut, in the order they were entered.
+    func licenses(for face: FontFace) -> [FontLicense] {
+        licenses[face.identity] ?? []
+    }
+
+    /// The projects a cut is licensed for, in one line.
     func license(for face: FontFace) -> String {
-        licenses[face.identity] ?? ""
+        licenses(for: face).map(\.project).joined(separator: ", ")
     }
 
     func isLicensed(_ face: FontFace) -> Bool {
-        !(licenses[face.identity] ?? "").isEmpty
+        licenses[face.identity] != nil
     }
 
     /// Every project name in use, for picking one again.
     var licenseProjects: [String] {
-        Array(Set(licenses.values)).sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+        Array(Set(licenses.values.flatMap { $0.map(\.project) })).sorted { $0.localizedStandardCompare($1) == .orderedAscending }
     }
 
-    /// Records the project these cuts are licensed for. An empty project clears the record.
-    func setLicense(_ project: String, for faces: [FontFace]) {
+    /// Records a project these cuts are licensed for, beside the projects they already have.
+    func addLicense(_ project: String, for faces: [FontFace]) {
         guard let database else { return }
         let trimmed = project.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
         var updated = licenses
         do {
-            for face in faces {
-                try database.setLicense(filePath: face.filePath, faceIndex: face.faceIndex, project: trimmed)
-                if trimmed.isEmpty {
-                    updated.removeValue(forKey: face.identity)
-                } else {
-                    updated[face.identity] = trimmed
-                }
+            for face in faces where !(updated[face.identity] ?? []).contains(where: { $0.project == trimmed }) {
+                try database.addLicense(filePath: face.filePath, faceIndex: face.faceIndex, project: trimmed)
+                updated[face.identity, default: []].append(FontLicense(project: trimmed, until: nil))
             }
             if updated != licenses { licenses = updated }
         } catch {
             alertMessage = error.localizedDescription
         }
+    }
+
+    /// Takes the license for one project away from these cuts.
+    func removeLicense(_ project: String, for faces: [FontFace]) {
+        guard let database else { return }
+        var updated = licenses
+        do {
+            for face in faces {
+                guard var kept = updated[face.identity], kept.contains(where: { $0.project == project }) else { continue }
+                try database.removeLicense(filePath: face.filePath, faceIndex: face.faceIndex, project: project)
+                kept.removeAll { $0.project == project }
+                updated[face.identity] = kept.isEmpty ? nil : kept
+            }
+            if updated != licenses { licenses = updated }
+        } catch {
+            alertMessage = error.localizedDescription
+        }
+    }
+
+    /// Sets until when these cuts' license for one project runs. Nil takes the end date away. Cuts without that
+    /// license are skipped.
+    func setLicenseEnd(_ date: Date?, project: String, for faces: [FontFace]) {
+        guard let database else { return }
+        let day = date.map { Calendar.current.startOfDay(for: $0) }
+        var updated = licenses
+        do {
+            for face in faces {
+                guard var kept = updated[face.identity], let index = kept.firstIndex(where: { $0.project == project }) else { continue }
+                try database.setLicenseEnd(
+                    filePath: face.filePath,
+                    faceIndex: face.faceIndex,
+                    project: project,
+                    until: day?.timeIntervalSince1970 ?? 0
+                )
+                kept[index].until = day
+                updated[face.identity] = kept
+            }
+            if updated != licenses { licenses = updated }
+        } catch {
+            alertMessage = error.localizedDescription
+        }
+    }
+
+    /// A cut with a license whose last day has passed.
+    func licenseExpired(_ face: FontFace) -> Bool {
+        licenses(for: face).contains(where: \.expired)
+    }
+
+    /// What the licenses of these cuts come to, for a tag beside the name: expired, the next end date, or just licensed.
+    func licenseNote(for faces: [FontFace]) -> LicenseNote? {
+        var seen = Set<FontLicense>()
+        let all = faces.flatMap { licenses(for: $0) }.filter { seen.insert($0).inserted }
+        guard !all.isEmpty else { return nil }
+        let lines = all.map { license -> String in
+            guard let until = license.until else { return "\(license.project): no end date" }
+            return "\(license.project): \(license.expired ? "expired" : "until") \(FontLicense.day.string(from: until))"
+        }
+        let help = lines.joined(separator: "\n")
+        let expired = all.filter(\.expired)
+        if let latest = expired.compactMap(\.until).max() {
+            let day = FontLicense.day.string(from: latest)
+            return expired.count == 1
+                ? LicenseNote(text: "License expired \(day)", short: "expired \(day)", expired: true, help: help)
+                : LicenseNote(text: "\(expired.count) licenses expired", short: "\(expired.count) expired", expired: true, help: help)
+        }
+        if let next = all.compactMap(\.until).min() {
+            let day = FontLicense.day.string(from: next)
+            return LicenseNote(text: "Licensed until \(day)", short: "until \(day)", expired: false, help: help)
+        }
+        return LicenseNote(text: "Licensed", short: "", expired: false, help: help)
+    }
+
+    /// How many cuts carry a license whose last day has passed.
+    var expiredLicenseCount: Int {
+        licenses.values.filter { $0.contains(where: \.expired) }.count
     }
 
     var isViewingList: Bool {
@@ -335,6 +548,15 @@ final class LibraryStore {
         } else if sort == .custom {
             sort = .automatic
         }
+        switch new {
+        case .research, .news:
+            break
+        case .shape:
+            workspaceTab = .shape
+        default:
+            workspaceTab = pendingWorkspaceTab ?? .preview
+        }
+        pendingWorkspaceTab = nil
     }
 
     func backToOwnOrder() {
@@ -715,43 +937,82 @@ final class LibraryStore {
     @ObservationIgnored private var previewSelection: Set<Int64> = []
     @ObservationIgnored private var previewKey = ""
     @ObservationIgnored private var previewCache: [FontFace] = []
+    @ObservationIgnored private var previewHeadingCache: [Int64: String] = [:]
     /// Families the browser currently shows expanded; mirrored from the list so the preview knows a row means the whole family.
     var expandedFamilyNames: Set<String> = []
 
+    /// Every cut of the clicked sidebar source, stacked in Preview. Pins are a separate working set.
+    /// They come in the order the Sort menu asks for; a list keeps the order it was arranged in.
     var previewFaces: [FontFace] {
-        let key = "\(String(describing: filter))|\(expandedFamilyNames.count)|\(expandedFamilyNames.hashValue)|\(pinnedIdentities.joined(separator: ","))"
-        if previewRevision == listRevision, previewSelection == selection, previewKey == key {
-            return previewCache
+        refreshPreviewOrder()
+        return previewCache
+    }
+
+    /// The first cut of every sort group that has a name, such as a category or a foundry, with that name.
+    var previewHeadings: [Int64: String] {
+        refreshPreviewOrder()
+        return previewHeadingCache
+    }
+
+    private func refreshPreviewOrder() {
+        let groups = browseGroups
+        if previewKey == browseKey, !previewKey.isEmpty { return }
+        var result: [FontFace] = []
+        var headings: [Int64: String] = [:]
+        result.reserveCapacity(groups.reduce(0) { $0 + $1.families.reduce(0) { $0 + $1.faces.count } })
+        for group in groups {
+            let start = result.count
+            for family in group.families {
+                if family.customOrdered {
+                    result.append(contentsOf: family.faces)
+                } else {
+                    result.append(contentsOf: family.faces.sorted { lhs, rhs in
+                        if lhs.weightClass != rhs.weightClass { return lhs.weightClass < rhs.weightClass }
+                        if lhs.isItalic != rhs.isItalic { return !lhs.isItalic }
+                        return lhs.style.localizedStandardCompare(rhs.style) == .orderedAscending
+                    })
+                }
+            }
+            if groups.count > 1, !group.title.isEmpty, result.count > start {
+                headings[result[start].id] = group.title
+            }
         }
-        var chosen = fonts.filter { selection.contains($0.id) }
-        // One collapsed family row stands for every cut the view holds, so the preview shows them all.
-        // With several rows selected, each family keeps a single slice and its Cut menu.
-        if chosen.count == 1, let only = chosen.first, !expandedFamilyNames.contains(only.family),
-           let family = browseGroups.lazy.flatMap(\.families).first(where: { $0.representative.id == only.id }) {
-            chosen = LibraryStore.oneSlicePerVariableFile(family.faces)
+        previewKey = browseKey
+        previewCache = result
+        previewHeadingCache = headings
+    }
+
+    /// Fonts from the news or the web that were saved in the open list. They have no file in the library.
+    var previewListLinks: [OutsideFont] {
+        guard case .group(let id) = filter else { return [] }
+        let links = listLinks[id] ?? []
+        let terms = query.split(whereSeparator: \.isWhitespace).map(String.init)
+        guard !terms.isEmpty else { return links }
+        return links.filter { item in
+            terms.allSatisfy { term in
+                item.name.localizedCaseInsensitiveContains(term) || item.source.localizedCaseInsensitiveContains(term)
+            }
         }
-        // Pinned fonts come first and stay while the selection moves on.
-        let pinnedSet = Set(pinnedIdentities)
-        var pinned: [FontFace] = []
-        for identity in pinnedIdentities {
-            if let face = self.face(identity: identity) { pinned.append(face) }
-        }
-        let faces = pinned + chosen.filter { !pinnedSet.contains($0.identity) }.sorted { lhs, rhs in
-            let family = lhs.family.localizedStandardCompare(rhs.family)
-            if family != .orderedSame { return family == .orderedAscending }
-            if lhs.weightClass != rhs.weightClass { return lhs.weightClass < rhs.weightClass }
-            if lhs.isItalic != rhs.isItalic { return !lhs.isItalic }
-            return lhs.style.localizedStandardCompare(rhs.style) == .orderedAscending
-        }
-        previewRevision = listRevision
-        previewSelection = selection
-        previewKey = key
-        previewCache = faces
-        return faces
+    }
+
+    /// Whether the search or a filter is holding fonts back in the open view.
+    var narrowsView: Bool {
+        activeFilterCount > 0 || !query.isEmpty
     }
 
     var previewFace: FontFace? {
-        previewFaces.first
+        if let id = selection.first, let face = face(id: id) { return face }
+        return pinnedFaces.first ?? previewFaces.first
+    }
+
+    /// Fonts pinned for Compare, Shape, Mix, and Playground.
+    var pinnedFaces: [FontFace] {
+        pinnedIdentities.compactMap { face(identity: $0) }
+    }
+
+    /// The pin tray: Compare, Shape, Mix, and Playground work from these.
+    var workingFaces: [FontFace] {
+        pinnedFaces
     }
 
     // MARK: Review
@@ -935,25 +1196,163 @@ final class LibraryStore {
         pinnedIdentities = []
     }
 
-    /// Puts fonts into the preview beside the ones already there, for Align and Overlay.
+    /// Puts fonts at a place in the pinned row, pinning those that are not there yet. Without a target they go to the end.
+    @discardableResult
+    func placePinned(_ identities: [String], before target: String?) -> Bool {
+        let valid = identities.filter { hasFace(identity: $0) }
+        guard !valid.isEmpty else { return false }
+        let fresh = valid.first { !pinnedIdentities.contains($0) }
+        let order = PinOrder.place(valid, before: target, in: pinnedIdentities)
+        if order != pinnedIdentities { pinnedIdentities = order }
+        if let fresh, let face = face(identity: fresh) {
+            selection = [face.id]
+            outsideSelection = []
+        }
+        return true
+    }
+
+    /// Moves a pinned font by places to the left or right.
+    func stepPinned(_ face: FontFace, by offset: Int) {
+        let order = PinOrder.step(face.identity, by: offset, in: pinnedIdentities)
+        if order != pinnedIdentities { pinnedIdentities = order }
+    }
+
+    /// Sorts the pinned fonts once. The order can be changed by hand afterwards.
+    func sortPinned(_ key: PinOrder.Key) {
+        let sorted = PinOrder.sorted(pinnedFaces, by: key).map(\.identity)
+        // Pins whose file is away keep their place behind the others.
+        let order = sorted + pinnedIdentities.filter { !sorted.contains($0) }
+        if order != pinnedIdentities { pinnedIdentities = order }
+    }
+
+    func reversePinned() {
+        pinnedIdentities.reverse()
+    }
+
+    /// Pins fonts so Compare, Shape, Mix, and Playground can use them.
     @discardableResult
     func addToPreview(_ identities: [String]) -> Bool {
-        let wanted = Set(identities)
-        let ids = fonts.filter { wanted.contains($0.identity) }.map(\.id)
-        guard !ids.isEmpty else { return false }
-        var next = Set(previewFaces.map(\.id))
-        next.formUnion(ids)
-        selection = next
+        let valid = identities.filter { hasFace(identity: $0) }
+        guard !valid.isEmpty else { return false }
+        for identity in valid where !pinnedIdentities.contains(identity) {
+            pinnedIdentities.append(identity)
+        }
+        if let first = valid.first, let face = face(identity: first) {
+            selection = [face.id]
+        }
         outsideSelection = []
         return true
     }
 
-    /// Takes one font out of the preview, unpinning it when pinned; the rest stays.
+    /// Opens a mode of the preview. From a chat or the news it goes back to the library first, where the modes live.
+    func openWorkspace(_ tab: WorkspaceTab) {
+        switch filter {
+        case .research, .news, .shape:
+            // The view change that follows would open Preview; it opens this mode instead.
+            pendingWorkspaceTab = tab
+            filter = .all
+        default:
+            workspaceTab = tab
+        }
+    }
+
+    @ObservationIgnored private var pendingWorkspaceTab: WorkspaceTab?
+
+    /// Takes a font out of the pin tray.
     func removeFromPreview(_ face: FontFace) {
         pinnedIdentities.removeAll { $0 == face.identity }
-        var shown = selection.contains(face.id) ? selection : Set(previewFaces.map(\.id))
-        shown.remove(face.id)
-        selection = shown
+    }
+
+    /// Highlights a cut, opens its Info under the navigation, and scrolls the stacked preview to it.
+    func selectInPreview(_ face: FontFace, scroll: Bool = true) {
+        selection = [face.id]
+        infoPanelOpen = true
+        if scroll {
+            focusPreviewID = face.id
+        }
+    }
+
+    /// The Info panel under the navigation: everything about the selected cut.
+    var infoPanelOpen = UserDefaults.standard.object(forKey: "fontso.infoPanelOpen") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(infoPanelOpen, forKey: "fontso.infoPanelOpen") }
+    }
+
+    /// OpenType switches moved away from the font's defaults, by feature id. Set in Info, applied to every font
+    /// in the preview, so "small caps on" carries over when comparing.
+    var featureOverrides: [String: Bool] = [:]
+
+    func faces(inList id: Int64) -> [FontFace] {
+        let keys = listOrder[id] ?? Array(membership[id, default: []])
+        return keys.compactMap { face(identity: $0) }
+    }
+
+    func listHasFonts(_ id: Int64) -> Bool {
+        !(listOrder[id] ?? Array(membership[id, default: []])).isEmpty || !(listLinks[id] ?? []).isEmpty
+    }
+
+    func toggleFontList(_ id: Int64) {
+        if expandedFontLists.contains(id) {
+            expandedFontLists.remove(id)
+        } else {
+            expandedFontLists.insert(id)
+        }
+    }
+
+    func toggleViewFonts(_ filter: LibraryFilter) {
+        if expandedViews.contains(filter) {
+            expandedViews.remove(filter)
+        } else {
+            expandedViews.insert(filter)
+        }
+    }
+
+    /// One family as the navigation lists it under an open list or library view.
+    struct NavigationFamily: Identifiable {
+        var name: String
+        var faces: [FontFace]
+        var id: String { faces.first?.identity ?? name }
+
+        /// The cut that stands for the family: upright, closest to regular.
+        var lead: FontFace {
+            faces.min { lhs, rhs in
+                if lhs.isItalic != rhs.isItalic { return !lhs.isItalic }
+                return abs(lhs.weightClass - 400) < abs(rhs.weightClass - 400)
+            } ?? faces[0]
+        }
+    }
+
+    @ObservationIgnored private var navigationFamilyToken = ""
+    @ObservationIgnored private var navigationFamilyCache: [LibraryFilter: [NavigationFamily]] = [:]
+
+    /// The families behind a row of the navigation. A list keeps its own order; a library view goes by name.
+    func navigationFamilies(_ filter: LibraryFilter) -> [NavigationFamily] {
+        if case .group(let id) = filter {
+            var order: [String] = []
+            var byFamily: [String: [FontFace]] = [:]
+            for face in faces(inList: id) {
+                let key = face.family.lowercased()
+                if byFamily[key] == nil { order.append(key) }
+                byFamily[key, default: []].append(face)
+            }
+            return order.compactMap { key in
+                byFamily[key].map { NavigationFamily(name: $0[0].family, faces: $0) }
+            }
+        }
+        let token = "\(contentRevision)|\(fonts.count)|\(favoriteKeys.count)|\(licenses.count)|\(standardMembership.count)|\(folders.count)"
+        if token != navigationFamilyToken {
+            navigationFamilyCache = [:]
+            navigationFamilyToken = token
+        }
+        if let hit = navigationFamilyCache[filter] { return hit }
+        var byFamily: [String: [FontFace]] = [:]
+        for face in fonts where matches(filter, face: face) {
+            byFamily[face.family.lowercased(), default: []].append(face)
+        }
+        let families = byFamily.values
+            .map { NavigationFamily(name: $0[0].family, faces: $0) }
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        navigationFamilyCache[filter] = families
+        return families
     }
 
     /// A variable font file carries every named instance as its own face. In a family preview, each such file is one
@@ -1050,7 +1449,7 @@ final class LibraryStore {
             if face.isVariable { note(.variable) }
             if face.isWebfont { note(.webfonts) } else { note(.desktop) }
             if favoriteKeys.contains(identity) { note(.favorites) }
-            if !(licenses[identity] ?? "").isEmpty { note(.licensed) }
+            if licenses[identity] != nil { note(.licensed) }
             let listed = standardMembership[identity] ?? listedCategories(face)
             var typed = false
             for category in listed where category != .unclassified {
@@ -2008,23 +2407,66 @@ final class LibraryStore {
         outsideHits = hits
     }
 
-    func refreshWatchedFonts() async {
-        let repair = (try? database?.meta("foundryRead")) != "2"
-        let watched = foundries.filter(\.watched)
-        let pending = repair ? watched : watched.filter { (foundryFaces[$0.id] ?? []).isEmpty }
-        guard !pending.isEmpty else {
-            if repair { try? database?.setMeta("foundryRead", "2") }
-            return
-        }
-        isReadingFoundries = true
-        defer { isReadingFoundries = false }
-        let batch = Array(pending.prefix(repair ? 20 : 12))
-        for foundry in batch {
+    /// Reads the followed foundries whose last reading is older than `newsInterval`, the longest unread first.
+    /// With `force` every followed foundry is read now.
+    func refreshWatchedFonts(force: Bool = false) async {
+        let now = Date()
+        let due = foundries.filter(\.watched).filter { foundry in
+            if force { return true }
+            // A site that did not answer is left alone for a while.
+            if let tried = foundryTriedAt[foundry.host], now.timeIntervalSince(tried) < 15 * 60 { return false }
+            guard let read = foundryReadAt[foundry.host] else { return true }
+            return now.timeIntervalSince(read) > LibraryStore.newsInterval
+        }.sorted { (foundryReadAt[$0.host] ?? .distantPast) < (foundryReadAt[$1.host] ?? .distantPast) }
+        guard !due.isEmpty else { return }
+        isCheckingNews = true
+        defer { isCheckingNews = false }
+        for foundry in due {
             if Task.isCancelled { return }
+            foundryTriedAt[foundry.host] = Date()
             await readTypefaces(of: foundry)
         }
-        if repair, pending.count <= batch.count {
-            try? database?.setMeta("foundryRead", "2")
+    }
+
+    /// Looks for new names at the followed foundries. The reading runs on its own, so leaving News does not stop it.
+    func checkNews(force: Bool = false) {
+        guard newsTask == nil else { return }
+        newsTask = Task { [weak self] in
+            await self?.refreshWatchedFonts(force: force)
+            self?.newsTask = nil
+        }
+    }
+
+    /// Checks for news at launch and from then on every half hour; each foundry is read when its turn has come.
+    func startNewsWatch() {
+        checkNews()
+        newsTimer?.invalidate()
+        newsTimer = Timer.scheduledTimer(withTimeInterval: 30 * 60, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.checkNews() }
+        }
+    }
+
+    /// The latest reading of a followed foundry.
+    var newsCheckedAt: Date? {
+        foundries.filter(\.watched).compactMap { foundryReadAt[$0.host] }.max()
+    }
+
+    private func loadFoundryReadTimes() {
+        guard let text = try? database?.meta("foundryReadAt"), let data = text.data(using: .utf8),
+              let stored = try? JSONDecoder().decode([String: Double].self, from: data) else { return }
+        foundryReadAt = stored.mapValues { Date(timeIntervalSince1970: $0) }
+        if let text = try? database?.meta("foundryReader"), let data = text.data(using: .utf8),
+           let versions = try? JSONDecoder().decode([String: Int].self, from: data) {
+            foundryReader = versions
+        }
+    }
+
+    private func saveFoundryReadTimes() {
+        guard let data = try? JSONEncoder().encode(foundryReadAt.mapValues(\.timeIntervalSince1970)),
+              let text = String(data: data, encoding: .utf8) else { return }
+        try? database?.setMeta("foundryReadAt", text)
+        if let data = try? JSONEncoder().encode(foundryReader), let text = String(data: data, encoding: .utf8) {
+            try? database?.setMeta("foundryReader", text)
         }
     }
 
@@ -2136,8 +2578,8 @@ final class LibraryStore {
         if FoundryLookup.isDirectoryHost(url), let site = foundrySite(for: item) {
             url = site
         }
-        if !FoundryLookup.isDirectoryHost(url), url.path.count <= 1, let html = await FoundryFetch.text(url),
-           let page = FoundryLookup.typefacePage(on: url, name: item.name, html: html) {
+        if !FoundryLookup.isDirectoryHost(url), url.path.count <= 1,
+           let page = await typefacePage(on: url, name: item.name) {
             url = page
         }
         if url.path.count <= 1 || FoundryLookup.isDirectoryHost(url),
@@ -2149,7 +2591,7 @@ final class LibraryStore {
                !FoundryLookup.isDirectoryHost(page), page.path.count > 1 {
                 let origin = FoundryLookup.siteHost(url)
                 if origin == nil || FoundryLookup.siteHost(page) == origin {
-                    url = page
+                    url = FoundryLookup.secure(page)
                 }
             }
         } else if image == nil, let html = await FoundryFetch.text(FoundryLookup.typecacheSearchURL(item.name)) {
@@ -2163,9 +2605,38 @@ final class LibraryStore {
             url: url,
             imageURL: image
         )
+        // The page found for a name in the news is kept, so it opens straight away the next time.
+        if url != item.url, url.path.count > 1,
+           let index = notices.firstIndex(where: { $0.name == item.name && $0.foundryName == item.source && $0.url == item.url }) {
+            try? database?.setNoticePage(id: notices[index].id, url: url)
+            notices[index].url = url
+        }
         if let index = outsideSelection.firstIndex(where: { $0.id == item.id }) {
             outsideSelection[index] = updated
         }
+    }
+
+    /// The page of a typeface on its foundry's site: a link on the front page, or, where the site builds its
+    /// catalogue in the browser and names no link, one of the usual addresses that answers.
+    private func typefacePage(on site: URL, name: String) async -> URL? {
+        if let html = await FoundryFetch.text(site),
+           let page = FoundryLookup.typefacePage(on: site, name: name, html: html) {
+            return page
+        }
+        let candidates = FoundryLookup.candidatePages(on: site, name: name)
+        guard !candidates.isEmpty else { return nil }
+        let answers = await withTaskGroup(of: (Int, Bool).self) { group -> [Int: Bool] in
+            for (index, candidate) in candidates.enumerated() {
+                group.addTask { (index, await FoundryFetch.exists(candidate)) }
+            }
+            var found: [Int: Bool] = [:]
+            for await (index, there) in group { found[index] = there }
+            return found
+        }
+        guard let first = candidates.indices.first(where: { answers[$0] == true }) else { return nil }
+        // A site that also answers a name no foundry has says yes to everything.
+        if await FoundryFetch.exists(FoundryLookup.controlPage(for: candidates[first])) { return nil }
+        return candidates[first]
     }
 
     func relatedFoundryFonts(for face: FontFace) -> [OutsideFont] {
@@ -2206,20 +2677,20 @@ final class LibraryStore {
 
     func readTypefaces(of foundry: FoundryEntry) async {
         guard let database else { return }
-        var names: [String] = []
+        let site = FoundryLookup.secure(foundry.url)
+        // The typefaces the foundry links on its own site, each with its page.
+        var links: [FoundryTypefaceLink] = []
         var drafts: [FoundryNoticeDraft] = []
         var confirmed = false
-        if let html = await FoundryFetch.text(foundry.url) {
+        if let html = await FoundryFetch.text(site) {
             confirmed = true
-            for name in FoundryLookup.linkedTypefaces(on: foundry.url, html: html) where !names.contains(name) {
-                names.append(name)
-            }
+            links = FoundryLookup.linkedTypefacePages(on: site, html: html)
             var feedXML: String?
-            if let feed = FoundryLookup.feedURL(in: html, base: foundry.url) {
+            if let feed = FoundryLookup.feedURL(in: html, base: site) {
                 feedXML = await FoundryFetch.text(feed)
             }
             if feedXML == nil {
-                for candidate in FoundryLookup.commonFeedURLs(foundry.url) {
+                for candidate in FoundryLookup.commonFeedURLs(site) {
                     guard let xml = await FoundryFetch.text(candidate),
                           xml.contains("<rss") || xml.contains("<feed") else { continue }
                     feedXML = xml
@@ -2227,28 +2698,42 @@ final class LibraryStore {
                 }
             }
             if let feedXML {
-                for item in FoundryLookup.feedItems(in: feedXML, base: foundry.url) {
-                    drafts.append(FoundryNoticeDraft(name: item.title, url: item.url, publishedAt: item.published))
+                for item in FoundryLookup.feedItems(in: feedXML, base: site) {
+                    drafts.append(FoundryNoticeDraft(name: item.title, url: FoundryLookup.secure(item.url), publishedAt: item.published))
                 }
             }
         }
+        var names = links.map(\.name)
         if let html = await FoundryFetch.text(FoundryLookup.typecacheSearchURL(foundry.name)) {
             let listed = FoundryLookup.typefaces(ofFoundry: foundry.name, in: html)
             if !listed.isEmpty { confirmed = true }
-            for name in listed where !names.contains(name) {
-                names.append(name)
+            for name in listed {
+                if let index = names.firstIndex(where: { FoundryLookup.sameTypeface($0, name) }) {
+                    // The directory writes the name by hand; the site's link may only have given its address.
+                    names[index] = name
+                } else {
+                    names.append(name)
+                }
             }
         }
         guard confirmed else { return }
         let stored = Array(names.prefix(40))
         for name in stored where !drafts.contains(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) {
-            drafts.append(FoundryNoticeDraft(name: name, url: foundry.url, publishedAt: nil))
+            // Its own page where the site links one; the front page otherwise, until the page is looked up.
+            let page = links.first { FoundryLookup.sameTypeface($0.name, name) }?.url ?? site
+            drafts.append(FoundryNoticeDraft(name: name, url: page, publishedAt: nil))
         }
         do {
             try database.replaceFoundryTypefaces(foundryID: foundry.id, names: stored)
-            try database.syncFoundryNotices(host: foundry.host, drafts: Array(drafts.prefix(60)))
+            // A foundry read before by an earlier way of reading: what the closer look finds now was there all
+            // along, so it joins the older names instead of counting as news.
+            let closerLook = foundryReadAt[foundry.host] != nil && foundryReader[foundry.host] != LibraryStore.foundryReaderVersion
+            try database.syncFoundryNotices(host: foundry.host, drafts: Array(drafts.prefix(60)), known: closerLook)
             foundryFaces[foundry.id] = stored
             notices = try database.foundryNotices()
+            foundryReadAt[foundry.host] = Date()
+            foundryReader[foundry.host] = LibraryStore.foundryReaderVersion
+            saveFoundryReadTimes()
         } catch {
             alertMessage = error.localizedDescription
         }
@@ -3206,7 +3691,9 @@ final class LibraryStore {
         guard let database else { return }
         favoriteKeys = try database.favoriteKeys()
         notes = try database.allNotes()
-        licenses = try database.allLicenses()
+        licenses = try database.allLicenseRecords().mapValues { records in
+            records.map { FontLicense(project: $0.project, until: $0.validUntil > 0 ? Date(timeIntervalSince1970: $0.validUntil) : nil) }
+        }
         standardMembership = try database.standardLists()
         reviewMarks = try database.reviewMarks()
         groups = try database.allGroups()

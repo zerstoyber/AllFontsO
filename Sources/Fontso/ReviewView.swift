@@ -70,13 +70,13 @@ struct ReviewView: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .firstTextBaseline) {
                 Text("Review")
-                    .font(.title2.weight(.semibold))
+                    .font(.uiTitle2.weight(.semibold))
                 Text("Does each family sit in the right place?")
                     .foregroundStyle(.secondary)
                 Spacer()
                 if !queue.isEmpty {
                     Text("\(position + 1) of \(queue.count)")
-                        .font(.caption.monospacedDigit())
+                        .font(.uiCaption.monospacedDigit())
                         .foregroundStyle(.secondary)
                 }
                 Menu {
@@ -95,7 +95,7 @@ struct ReviewView: View {
                     .progressViewStyle(.linear)
                     .tint(done == queue.count ? .green : .accentColor)
                 Text("\(done) of \(queue.count) families confirmed. Least certain guesses come first; confirmed families wait at the back.")
-                    .font(.caption)
+                    .font(.uiCaption)
                     .foregroundStyle(.tertiary)
             }
         }
@@ -107,15 +107,15 @@ struct ReviewView: View {
             HStack(alignment: .firstTextBaseline, spacing: 10) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(family.name)
-                        .font(.title3.weight(.semibold))
+                        .font(.uiTitle3.weight(.semibold))
                     Text(subtitle(lead, count: family.faces.count))
-                        .font(.caption)
+                        .font(.uiCaption)
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
                 if let date = family.reviewedAt {
                     Label("Confirmed \(date.formatted(.relative(presentation: .named)))", systemImage: "checkmark.seal.fill")
-                        .font(.caption)
+                        .font(.uiCaption)
                         .foregroundStyle(.green)
                 }
                 Button {
@@ -180,7 +180,7 @@ struct ReviewView: View {
                 }
                 if ordered.count > shown.count {
                     Text("+\(ordered.count - shown.count) more")
-                        .font(.caption)
+                        .font(.uiCaption)
                         .foregroundStyle(.secondary)
                 }
             }
@@ -204,7 +204,7 @@ struct ReviewView: View {
                     Text("Filed under ") + Text(lead.category.rawValue).bold() + Text(" \(source.reason). ") + Text(confidenceWords(family.confidence)).foregroundStyle(.secondary)
                 }
             }
-            .font(.callout)
+            .font(.uiCallout)
             .fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -240,7 +240,7 @@ struct ReviewView: View {
     private func categoryChips(_ lead: FontFace) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Category")
-                .font(.caption.weight(.semibold))
+                .font(.uiCaption.weight(.semibold))
                 .foregroundStyle(.secondary)
             HStack(spacing: 6) {
                 ForEach(Array(FontCategory.typographic.enumerated()), id: \.element) { index, category in
@@ -251,12 +251,12 @@ struct ReviewView: View {
                         HStack(spacing: 4) {
                             Text(category.rawValue)
                             Text("\(index + 1)")
-                                .font(.caption2.monospacedDigit())
+                                .font(.uiCaption2.monospacedDigit())
                                 .foregroundStyle(on ? Color.white.opacity(0.8) : Color.secondary)
                         }
                         .padding(.horizontal, 10)
                         .padding(.vertical, 5)
-                        .background(on ? Color.accentColor : Color.primary.opacity(0.06), in: Capsule())
+                        .background(on ? AppChrome.highlight : Color.primary.opacity(0.06), in: Capsule())
                         .foregroundStyle(on ? Color.white : Color.primary)
                     }
                     .buttonStyle(.plain)
@@ -265,7 +265,7 @@ struct ReviewView: View {
                 }
             }
             Text("A family can sit in more than one category. Numbers on the keyboard switch them.")
-                .font(.caption2)
+                .font(.uiCaption2)
                 .foregroundStyle(.tertiary)
         }
     }
@@ -332,7 +332,7 @@ struct ReviewView: View {
             Spacer()
             if confirmedFlash {
                 Label("Confirmed", systemImage: "checkmark")
-                    .font(.caption)
+                    .font(.uiCaption)
                     .foregroundStyle(.green)
                     .transition(.opacity)
             }

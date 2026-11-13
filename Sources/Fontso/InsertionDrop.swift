@@ -65,7 +65,7 @@ struct InsertionDrop: ViewModifier {
     private var marker: some View {
         if hovering, reordering, edge == .inside {
             RoundedRectangle(cornerRadius: 8)
-                .stroke(Color.accentColor, lineWidth: 2)
+                .stroke(AppChrome.highlight, lineWidth: 2)
                 .allowsHitTesting(false)
         } else if hovering, reordering, let edge {
             VStack(spacing: 0) {
@@ -77,7 +77,7 @@ struct InsertionDrop: ViewModifier {
             .allowsHitTesting(false)
         } else if framesOthers, othersHovered {
             RoundedRectangle(cornerRadius: 8)
-                .stroke(Color.accentColor, lineWidth: 2)
+                .stroke(AppChrome.highlight, lineWidth: 2)
                 .allowsHitTesting(false)
         }
     }
@@ -137,10 +137,10 @@ struct InsertionLine: View {
     var body: some View {
         HStack(spacing: 0) {
             Circle()
-                .fill(Color.accentColor)
+                .fill(AppChrome.highlight)
                 .frame(width: 7, height: 7)
             Rectangle()
-                .fill(Color.accentColor)
+                .fill(AppChrome.highlight)
                 .frame(height: 2)
         }
         .frame(height: 7)

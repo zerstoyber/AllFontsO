@@ -40,6 +40,17 @@ public struct FoundryNoticeDraft: Sendable, Equatable {
     }
 }
 
+/// A typeface named on a foundry's own site, with the page it is linked to.
+public struct FoundryTypefaceLink: Sendable, Equatable {
+    public var name: String
+    public var url: URL
+
+    public init(name: String, url: URL) {
+        self.name = name
+        self.url = url
+    }
+}
+
 public struct FoundryFeedItem: Sendable, Equatable {
     public var title: String
     public var url: URL
@@ -282,36 +293,133 @@ public enum FoundryLookup {
                 best = (url, score)
             }
         }
-        return best?.url
+        return best.map { secure($0.url) }
     }
 
     /// Typeface names linked on a foundry's own site, such as /typeface/avantt.
     public static func linkedTypefaces(on site: URL, html: String, limit: Int = 40) -> [String] {
+        linkedTypefacePages(on: site, html: html, limit: limit).map(\.name)
+    }
+
+    /// The typefaces a foundry links on its own site, each with the address of its page: /typefaces/arizona,
+    /// /retail-fonts/founders-grotesk. A link counts when a folder above its last part is the catalogue; pages
+    /// about fonts, such as fonts in use, trial fonts, or a designer, are left out.
+    public static func linkedTypefacePages(on site: URL, html: String, limit: Int = 40) -> [FoundryTypefaceLink] {
         guard let home = URL(string: "/", relativeTo: site)?.absoluteURL else { return [] }
         guard let regex = try? NSRegularExpression(
             pattern: "<a\\s[^>]*href=\"([^\"]+)\"[^>]*>([\\s\\S]*?)</a>",
             options: [.caseInsensitive]
         ) else { return [] }
         let range = NSRange(html.startIndex..<html.endIndex, in: html)
-        var names: [String] = []
-        var seen = Set<String>()
+        var found: [FoundryTypefaceLink] = []
+        var index: [String: Int] = [:]
+        var labelled = Set<String>()
         for match in regex.matches(in: html, range: range) {
             guard let hrefRange = Range(match.range(at: 1), in: html),
                   let labelRange = Range(match.range(at: 2), in: html),
                   let url = resolveLink(String(html[hrefRange]), base: home),
                   sameSite(url, site) else { continue }
-            let path = url.path.lowercased()
-            guard path.contains("typeface") || path.contains("font") else { continue }
-            if path.contains("/assets/") || path.hasSuffix(".js") || path.hasSuffix(".css") { continue }
-            let last = url.path.split(separator: "/").last.map(String.init) ?? ""
+            let parts = url.path.split(separator: "/").map(String.init)
+            guard parts.count >= 2, let last = parts.last else { continue }
+            let folders = parts.dropLast().map { slug($0) }
+            guard folders.contains(where: isCatalogFolder), !folders.contains(where: isAboutFonts) else { continue }
+            let lowered = last.lowercased()
+            if lowered.hasSuffix(".js") || lowered.hasSuffix(".css") || folders.contains("assets") { continue }
             let key = slug(last)
-            guard key.count >= 3, !genericTypefaceKeys.contains(key), seen.insert(key).inserted else { continue }
-            let label = plain(String(html[labelRange])).trimmingCharacters(in: .whitespacesAndNewlines)
-            let display = (label.count >= 2 && label.count <= 48) ? label : titledSlug(last)
-            names.append(display)
-            if names.count >= limit { break }
+            guard key.count >= 3, !genericTypefaceKeys.contains(key), !isAboutFonts(key) else { continue }
+            let written = labelName(plain(String(html[labelRange])), key: key)
+            if let position = index[key] {
+                // The same page linked twice, once by a picture and once by its name: the written name wins.
+                if let written, !labelled.contains(key) {
+                    found[position].name = written
+                    labelled.insert(key)
+                }
+                continue
+            }
+            guard found.count < limit else { continue }
+            index[key] = found.count
+            if written != nil { labelled.insert(key) }
+            found.append(FoundryTypefaceLink(name: written ?? titledSlug(last), url: secure(url)))
         }
-        return names
+        return found
+    }
+
+    /// Whether a line read from a foundry's site can be the name of a typeface. Lines about fonts are none:
+    /// “Custom Fonts”, “Fonts in Use”, “60 styles • Variable Surt”, a headline.
+    public static func isTypefaceName(_ name: String) -> Bool {
+        let words = name.split(whereSeparator: { $0.isWhitespace }).map { $0.lowercased() }
+        guard !words.isEmpty, words.count <= 5, !name.contains("•") else { return false }
+        return !words.contains { ["font", "fonts", "typeface", "typefaces"].contains($0.trimmingCharacters(in: .punctuationCharacters)) }
+    }
+
+    /// The same address over https. Nearly every foundry answers there, and macOS refuses plain http.
+    public static func secure(_ url: URL) -> URL {
+        guard url.scheme?.lowercased() == "http",
+              var parts = URLComponents(url: url, resolvingAgainstBaseURL: true) else { return url }
+        parts.scheme = "https"
+        return parts.url ?? url
+    }
+
+    /// Whether two spellings name the same typeface: AM Aosta, Am Aosta, am-aosta.
+    public static func sameTypeface(_ lhs: String, _ rhs: String) -> Bool {
+        let left = slug(lhs)
+        return !left.isEmpty && left == slug(rhs)
+    }
+
+    /// Where a typeface's page usually lives when the foundry's site names no link for it, as on sites that build
+    /// their catalogue in the browser: /amiral, /typefaces/amiral, /fonts/amiral.
+    public static func candidatePages(on site: URL, name: String) -> [URL] {
+        guard let home = URL(string: "/", relativeTo: secure(site))?.absoluteURL else { return [] }
+        let words = folded(name).split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map(String.init)
+        guard !words.isEmpty, words.joined().count >= 3 else { return [] }
+        var endings = [words.joined(separator: "-")]
+        if words.count > 1 { endings.append(words.joined()) }
+        var pages: [URL] = []
+        for folder in ["typefaces/", "typeface/", "fonts/", "font/", "", "retail/", "families/"] {
+            for ending in endings {
+                // Straight under the site's name only a real name counts: /about and /contact are no typefaces.
+                if folder.isEmpty, genericTypefaceKeys.contains(slug(ending)) { continue }
+                if let url = URL(string: folder + ending, relativeTo: home)?.absoluteURL, !pages.contains(url) {
+                    pages.append(url)
+                }
+            }
+        }
+        return pages
+    }
+
+    /// An address beside a candidate that no foundry has. A site that answers it too answers everything, so its
+    /// yes to the candidate says nothing.
+    public static func controlPage(for candidate: URL) -> URL {
+        candidate.deletingLastPathComponent().appendingPathComponent("zz-no-such-typeface-q7")
+    }
+
+    private static func isCatalogFolder(_ folder: String) -> Bool {
+        if ["typeface", "typefaces", "font", "fonts", "family", "families", "retail", "library", "catalogue", "catalog"].contains(folder) {
+            return true
+        }
+        return (folder.hasSuffix("fonts") || folder.hasSuffix("typefaces")) && !isAboutFonts(folder)
+    }
+
+    /// Parts of an address that speak about fonts without being one.
+    private static func isAboutFonts(_ folder: String) -> Bool {
+        ["inuse", "designer", "quickview", "trial", "custom", "blog", "news", "journal", "form", "cart", "license", "licensing", "subscription", "pack"]
+            .contains { folder.contains($0) }
+    }
+
+    /// The typeface's name as the link writes it, when the link's words spell the address: “Ikarus 33% unlocked”
+    /// for /typefaces/ikarus gives Ikarus.
+    private static func labelName(_ label: String, key: String) -> String? {
+        let words = label.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+        guard !words.isEmpty, words.count <= 40 else { return nil }
+        for start in words.indices {
+            var joined = ""
+            for end in start..<min(words.count, start + 6) {
+                joined += slug(words[end])
+                if joined == key { return words[start...end].joined(separator: " ") }
+                if joined.count >= key.count { break }
+            }
+        }
+        return nil
     }
 
     /// Release dates written on a Typecache page, next to the sentence that names the fonts.

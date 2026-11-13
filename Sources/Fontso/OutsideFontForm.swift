@@ -22,11 +22,11 @@ struct OutsideFontForm: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text(editing == nil ? "Font from outside the library" : "Edit this item")
-                .font(.headline)
+                .font(.uiHeadline)
             Text(editing == nil
                 ? "Only the name and link are kept. Nothing is downloaded."
                 : "Correct the name, the source, or the page it points to. The change applies wherever this item is saved.")
-                .font(.caption)
+                .font(.uiCaption)
                 .foregroundStyle(.secondary)
             TextField("Name", text: $name, prompt: Text("Name of the font"))
                 .textFieldStyle(.roundedBorder)
@@ -47,6 +47,7 @@ struct OutsideFontForm: View {
         }
         .padding(16)
         .frame(width: 360)
+        .modifier(ChromeSheet())
     }
 
     private var url: URL? {
