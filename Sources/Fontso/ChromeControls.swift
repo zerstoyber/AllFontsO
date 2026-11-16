@@ -115,7 +115,7 @@ private struct SettingsBar: ViewModifier {
     }
 }
 
-/// A chip that carries a symbol and opens a menu: the three dots, to Playground.
+/// A chip that carries a symbol and opens a menu: the three dots, to Use.
 struct ChipMenu<Content: View>: View {
     var symbol: String
     var help: String
@@ -359,8 +359,7 @@ private struct VariableAxesPanel: View {
         }
         .padding(12)
         .frame(width: 320)
-        .background { Rectangle().fill(AppChrome.panel).ignoresSafeArea() }
-        .paperColors(ink: AppChrome.ink, paper: AppChrome.panel)
+        .modifier(ChromeSheet())
         .onAppear { base = Self.instanceValues(face) }
     }
 
@@ -390,25 +389,45 @@ private struct VariableAxesPanel: View {
     }
 }
 
-/// A chip that carries a symbol instead of a word: pin, to Playground, the three dots.
-struct IconChip: View {
+/// A chip that carries a symbol instead of a word: pin, to Use, the three dots.
+struct IconChip<Label: View>: View {
     var symbol: String
     var on = false
     /// Only the symbol, with a grey field under the pointer. For rows of small cards, where a filled chip is too loud.
     var quiet = false
+    /// As tall as a chip with a word, for the header and the row of tabs.
+    var tall = false
     var help: String
     var action: () -> Void
+    /// What stands in the chip instead of the symbol, such as the two colours of the paper.
+    var label: Label?
     @Environment(\.surface) private var surface
     @Environment(\.paperColor) private var paperColor
     @Environment(\.isEnabled) private var isEnabled
     @State private var hovering = false
 
+    init(symbol: String, on: Bool = false, quiet: Bool = false, tall: Bool = false, help: String, action: @escaping () -> Void, @ViewBuilder label: () -> Label) {
+        self.symbol = symbol
+        self.on = on
+        self.quiet = quiet
+        self.tall = tall
+        self.help = help
+        self.action = action
+        self.label = label()
+    }
+
     var body: some View {
         Button(action: action) {
-            Image(systemName: symbol)
-                .font(.system(size: 8, weight: .medium))
-                .foregroundStyle(quiet ? (on || hovering ? surface.ink : surface.half) : on ? (paperColor ?? AppChrome.panel) : surface.ink)
-                .frame(width: quiet ? 14 : 16, height: quiet ? 14 : 15)
+            Group {
+                if let label {
+                    label
+                } else {
+                    Image(systemName: symbol)
+                        .font(.system(size: tall ? 9 : 8, weight: .medium))
+                        .foregroundStyle(quiet ? (on || hovering ? surface.ink : surface.half) : on ? (paperColor ?? AppChrome.panel) : surface.ink)
+                }
+            }
+                .frame(width: tall ? 21 : quiet ? 14 : 16, height: tall ? ChipMetrics.compactHeight : quiet ? 14 : 15)
                 .background(
                     quiet
                         ? surface.ink.opacity(hovering ? 0.16 : 0)
@@ -425,6 +444,19 @@ struct IconChip: View {
         .opacity(isEnabled ? 1 : 0.4)
         .onHover { hovering = $0 }
         .help(help)
+        .accessibilityLabel(help)
+    }
+}
+
+extension IconChip where Label == EmptyView {
+    init(symbol: String, on: Bool = false, quiet: Bool = false, tall: Bool = false, help: String, action: @escaping () -> Void) {
+        self.symbol = symbol
+        self.on = on
+        self.quiet = quiet
+        self.tall = tall
+        self.help = help
+        self.action = action
+        self.label = nil
     }
 }
 
@@ -454,7 +486,7 @@ struct ChromeDock<Content: View>: View {
                     .layoutPriority(-1)
                 if let onHide {
                     Button(action: onHide) {
-                        ChromeChevron(open: true)
+                        ChromeChevron(open: true, rises: true)
                             .frame(width: 22)
                             .frame(maxHeight: .infinity)
                             .contentShape(Rectangle())
@@ -497,7 +529,7 @@ struct DockPill: View {
             Button(action: action) {
                 HStack(spacing: 6) {
                     Text(title)
-                    ChromeChevron(open: false)
+                    ChromeChevron(open: false, rises: true)
                 }
             }
             .buttonStyle(.chip())
@@ -541,40 +573,61 @@ struct DockSection<Accessory: View, Content: View>: View {
         self.content = content()
     }
 
+    private var label: some View {
+        HStack(spacing: 4) {
+            Text(title)
+                .font(AppChrome.small)
+                .foregroundStyle(surface.ink)
+            if let detail {
+                Text(detail)
+                    .font(AppChrome.small.monospacedDigit())
+                    .foregroundStyle(surface.half)
+            }
+        }
+        .fixedSize()
+    }
+
     var body: some View {
         HStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 5) {
-                HStack(spacing: 6) {
-                    Button {
-                        open.toggle()
-                    } label: {
-                        HStack(spacing: 4) {
-                            Text(title)
-                                .font(AppChrome.small)
-                                .foregroundStyle(surface.ink)
-                            if let detail {
-                                Text(detail)
-                                    .font(AppChrome.small.monospacedDigit())
-                                    .foregroundStyle(surface.half)
+            Group {
+                if open {
+                    VStack(alignment: .leading, spacing: 5) {
+                        HStack(spacing: 6) {
+                            Button {
+                                open = false
+                            } label: {
+                                HStack(spacing: 4) {
+                                    label
+                                    ChromeChevron(open: true, color: surface.half, size: 6, sideways: true)
+                                }
+                                .contentShape(Rectangle())
                             }
-                            ChromeChevron(open: open, color: surface.half, size: 6, sideways: true)
+                            .buttonStyle(.plain)
+                            .help("Fold \(title) away")
+                            Spacer(minLength: 4)
+                            accessory
                         }
-                        .fixedSize()
+                        .frame(height: 16)
+                        content
+                    }
+                    .padding(.horizontal, 12)
+                } else {
+                    // Folded, the title stands on its side: a strip as narrow as one line of text.
+                    Button {
+                        open = true
+                    } label: {
+                        VStack(spacing: 3) {
+                            ChromeChevron(open: false, color: surface.half, size: 6, sideways: true)
+                            Sideways { label.rotationEffect(.degrees(-90)) }
+                        }
+                        .frame(maxHeight: .infinity, alignment: .top)
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
-                    .help(open ? "Fold \(title) away" : "Show \(title)")
-                    if open {
-                        Spacer(minLength: 4)
-                        accessory
-                    }
-                }
-                .frame(height: 16)
-                if open {
-                    content
+                    .help("Show \(title)")
+                    .padding(.horizontal, 7)
                 }
             }
-            .padding(.horizontal, 12)
             .padding(.vertical, 8)
             .frame(minWidth: open ? minWidth : nil, maxWidth: open ? .infinity : nil, maxHeight: .infinity, alignment: .topLeading)
             .background {
@@ -585,6 +638,19 @@ struct DockSection<Accessory: View, Content: View>: View {
                 .fill(surface.hairline)
                 .frame(width: 0.5)
         }
+    }
+}
+
+/// Gives a view turned by a quarter the room it takes up then: as wide as it was tall, as tall as it was wide.
+struct Sideways: Layout {
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        guard let view = subviews.first else { return .zero }
+        let size = view.sizeThatFits(.unspecified)
+        return CGSize(width: size.height, height: size.width)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        subviews.first?.place(at: CGPoint(x: bounds.midX, y: bounds.midY), anchor: .center, proposal: .unspecified)
     }
 }
 
@@ -689,7 +755,7 @@ struct PinnedMenu: View {
 
     var body: some View {
         let identities = store.pinnedFaces.map(\.identity)
-        ChipMenu(symbol: "ellipsis", help: "Sort the pinned fonts, file them in a list, send them to Playground, or unpin them all") {
+        ChipMenu(symbol: "ellipsis", help: "Sort the pinned fonts, file them in a list, send them to Use, or unpin them all") {
             ForEach(extra) { item in
                 Button(item.title, action: item.action)
             }
@@ -706,7 +772,7 @@ struct PinnedMenu: View {
                     Button(store.menuTitle(group)) { store.addToGroup(group.id, identities: identities) }
                 }
             }
-            Button("Send pinned fonts to Playground") { store.addToPlayground(identities) }
+            Button("Send pinned fonts to Use") { store.addToPlayground(identities) }
             Divider()
             Button("Unpin all") { store.unpinAll() }
         }
@@ -834,7 +900,7 @@ struct PinnedBar: View {
     var swatch: ((FontFace) -> AnyView)?
 
     /// Large cards in rows, to sort and move the fonts. Compare and Shape share the choice.
-    @AppStorage("fontso.pinned.large") private var large = false
+    @AppStorage("fontso.pinned.large") private var large = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -972,13 +1038,13 @@ struct CutStrip: View {
         })
         .help(
             (onChoose == nil
-                ? "\(face.family) \(face.style). Click for its Info; drag it onto a list, a letter, or a text block."
+                ? "\(face.family) \(face.style). Click to select it; drag it onto a list, a letter, or a text block."
                 : "\(face.family) \(face.style). Click to make it the reference.")
                 + (moves ? " Drag it onto another pinned font to move it there." : "")
         )
         .contextMenu {
             Button(pinned ? "Unpin" : "Pin") { store.togglePin(face) }
-            Button("Show Info") { store.selectInPreview(face) }
+            Button("Show Info") { store.selectInPreview(face, showInfo: true) }
             Menu("Add to list") {
                 if store.groups.isEmpty {
                     Button("New list…") { store.showNewGroup = true }
@@ -1060,7 +1126,7 @@ struct CutStrip: View {
             symbol: pinned ? "pin.fill" : "pin",
             on: pinned,
             quiet: true,
-            help: pinned ? "Pinned. Click to unpin." : "Pin this cut for Compare, Shape, and Playground"
+            help: pinned ? "Pinned. Click to unpin." : "Pin this cut for Compare, Shape, and Use"
         ) {
             store.togglePin(face)
         }
@@ -1202,12 +1268,13 @@ private struct CardPlaceDrop: ViewModifier {
     }
 }
 
-/// Size, spacing, and line height of the sample, the values Preview and Mix share.
+/// Size, spacing, and line height of the sample, the values Preview and Mix share within a window.
 struct SampleAdjustRows: View {
-    @AppStorage("fontso.specimenSize") private var size = 48.0
+    @Environment(\.sampleSizes) private var sizes
+    private var size: Double { get { sizes.size } nonmutating set { sizes.size = newValue } }
+    private var tracking: Double { get { sizes.tracking } nonmutating set { sizes.tracking = newValue } }
+    private var leading: Double { get { sizes.leading } nonmutating set { sizes.leading = newValue } }
     @AppStorage("fontso.specimen.unit") private var unitRaw = SpecimenUnit.point.rawValue
-    @AppStorage("fontso.specimen.tracking") private var tracking = 0.0
-    @AppStorage("fontso.specimen.leading") private var leading = 1.2
 
     private var unit: SpecimenUnit { SpecimenUnit(rawValue: unitRaw) ?? .point }
 
@@ -1229,7 +1296,7 @@ struct SampleAdjustRows: View {
         let upper = unit.display(from: size * 2.4)
         VStack(alignment: .leading, spacing: 3) {
             DockSliderRow(title: "Size", value: displaySize, range: unit.display(from: 8)...unit.display(from: 240), step: step, fraction: fraction, reset: { size = 48 })
-            DockSliderRow(title: "Spacing", value: $tracking, range: -0.08...0.4, step: 0.01, fraction: 2, reset: { tracking = 0 })
+            DockSliderRow(title: "Spacing", value: Bindable(sizes).tracking, range: -0.08...0.4, step: 0.01, fraction: 2, reset: { tracking = 0 })
             DockSliderRow(title: "Height", value: displayLeading, range: lower...max(lower, upper), step: step, fraction: fraction, reset: { leading = 1.2 })
         }
     }
@@ -1250,28 +1317,38 @@ struct UnitSegments: View {
 
 extension View {
     /// Dresses a menu as a grey chip with its arrow, so it reads as a control that opens.
-    func chromeMenuChip(compact: Bool = false) -> some View {
-        modifier(MenuChip(compact: compact))
+    func chromeMenuChip(compact: Bool = false, icon: Bool = false) -> some View {
+        modifier(MenuChip(compact: compact, icon: icon))
     }
 }
 
 private struct MenuChip: ViewModifier {
     var compact: Bool
+    /// A symbol as the label: no arrow, and the width of an icon chip.
+    var icon = false
     @Environment(\.surface) private var surface
 
     func body(content: Content) -> some View {
         content
             .menuStyle(.borderlessButton)
+            .menuIndicator(icon ? .hidden : .automatic)
             .controlSize(compact ? .mini : .small)
             .fixedSize()
             .font(AppChrome.type(compact ? AppChrome.smallSize : 11))
             .foregroundStyle(surface.ink)
-            .padding(.horizontal, compact ? 6 : 8)
-            .padding(.vertical, compact ? 1.5 : 3)
+            .padding(.horizontal, icon ? 2 : compact ? 6 : 8)
+            // The height of a chip beside it, whatever height the system gives the menu itself.
+            .frame(height: compact ? ChipMetrics.compactHeight : ChipMetrics.height)
             .background(surface.control, in: RoundedRectangle(cornerRadius: 4, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 4, style: .continuous)
                     .stroke(surface.stroke, lineWidth: 0.5)
             )
     }
+}
+
+/// The heights of the chips, so buttons and menus in one row stand equally tall.
+enum ChipMetrics {
+    static let compactHeight: CGFloat = 17
+    static let height: CGFloat = 21
 }

@@ -91,4 +91,9 @@ enum SampleLineCache {
         cache.setObject(Box(rendered), forKey: key)
         return rendered
     }
+
+    /// Drops every rendered sample line so the next draw opens the files again.
+    static func clear() {
+        cache.removeAllObjects()
+    }
 }

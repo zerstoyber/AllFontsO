@@ -53,26 +53,113 @@ struct LicenseNote: Equatable {
     var help: String
 }
 
-enum WorkspaceTab: String, CaseIterable, Identifiable {
-    case preview, compare, shape, playground
+enum WorkspaceTab: String, CaseIterable, Identifiable, Codable {
+    case preview, pinned, compare, shape, playground
     var id: String { rawValue }
 
     var title: String {
         switch self {
         case .preview: return "Preview"
+        case .pinned: return "Pinned"
         case .compare: return "Compare"
         case .shape: return "Shape"
-        case .playground: return "Playground"
+        case .playground: return "Use"
         }
     }
 
     var help: String {
         switch self {
         case .preview: return "The clicked list or library view, every font stacked"
+        case .pinned: return "The pinned fonts, stacked as in Preview"
         case .compare: return "Align and Overlay using pinned fonts"
         case .shape: return "Find fonts by proportion, or mix the pinned cuts letter by letter"
         case .playground: return "Free page of text blocks"
         }
+    }
+
+    /// Stacks fonts on cards with search, sort, and filter above them.
+    var stacks: Bool { self == .preview || self == .pinned }
+}
+
+/// A mode in a window of its own. A Preview window keeps the list or library view it was opened with, so the
+/// main window can go on to other lists beside it.
+struct WorkspaceWindow: Hashable, Codable {
+    var tab: WorkspaceTab
+    /// The list or view of a Preview window, as `LibraryFilter.key`.
+    var source: String?
+
+    var filter: LibraryFilter? { source.flatMap { LibraryFilter(key: $0) } }
+}
+
+extension LibraryFilter {
+    /// A font view as text, to tell a window which one it shows. Chats, news, and Shape searches have none.
+    var key: String? {
+        switch self {
+        case .all: return "all"
+        case .available: return "available"
+        case .inactive: return "inactive"
+        case .variable: return "variable"
+        case .webfonts: return "webfonts"
+        case .desktop: return "desktop"
+        case .favorites: return "favorites"
+        case .licensed: return "licensed"
+        case .pinned: return "pinned"
+        case .category(let category): return "category:\(category.rawValue)"
+        case .folder(let id): return "folder:\(id)"
+        case .group(let id): return "group:\(id)"
+        case .research, .compare, .shape, .news, .newsList: return nil
+        }
+    }
+
+    init?(key: String) {
+        let parts = key.split(separator: ":", maxSplits: 1).map(String.init)
+        switch (parts.first ?? "", parts.count > 1 ? parts[1] : "") {
+        case ("all", _): self = .all
+        case ("available", _): self = .available
+        case ("inactive", _): self = .inactive
+        case ("variable", _): self = .variable
+        case ("webfonts", _): self = .webfonts
+        case ("desktop", _): self = .desktop
+        case ("favorites", _): self = .favorites
+        case ("licensed", _): self = .licensed
+        case ("pinned", _): self = .pinned
+        case ("category", let name):
+            guard let category = FontCategory(rawValue: name) else { return nil }
+            self = .category(category)
+        case ("folder", let id):
+            guard let number = Int64(id) else { return nil }
+            self = .folder(number)
+        case ("group", let id):
+            guard let number = Int64(id) else { return nil }
+            self = .group(number)
+        default: return nil
+        }
+    }
+}
+
+/// What a stacked preview shows when it does not follow the navigation: the Pinned tab, or a list opened in a
+/// window of its own. It has its own search and its own order, so two lists can stand side by side.
+@MainActor
+@Observable
+final class PreviewScope {
+    let source: LibraryFilter
+    var query = ""
+    var sort: LibrarySort
+    var sortAscending = true
+    @ObservationIgnored fileprivate var key = ""
+    @ObservationIgnored fileprivate var groups: [BrowseGroup] = []
+    @ObservationIgnored fileprivate var faces: [FontFace] = []
+    @ObservationIgnored fileprivate var headings: [Int64: String] = [:]
+
+    init(source: LibraryFilter, sort: LibrarySort) {
+        self.source = source
+        self.sort = sort
+    }
+
+    /// A list and the pinned fonts keep the order they were arranged in.
+    var keepsOwnOrder: Bool {
+        if case .group = source { return true }
+        return source == .pinned
     }
 }
 
@@ -119,6 +206,14 @@ enum ShapeMode: String, CaseIterable, Identifiable {
 @Observable
 final class LibraryStore {
     var folders: [FontFolder] = [] { didSet { touchLibrary() } }
+    /// Lists under News from Foundries.
+    var newsLists: [NewsList] = []
+    /// Notice ids filed in each news list.
+    var newsListMembers: [Int64: [Int64]] = [:]
+    var showNewNewsList = false
+    var newNewsListName = ""
+    var newsListPendingRename: NewsList?
+    var renameNewsListName = ""
     var fonts: [FontFace] = [] {
         didSet {
             fontsRevision += 1
@@ -188,7 +283,37 @@ final class LibraryStore {
     var statusText = ""
     var alertMessage: String?
     var previewExpanded = false
-    /// Right-hand workspace: Preview shows the clicked source; Compare / Shape / Playground use pinned fonts.
+    /// Right-hand workspace: Preview shows the clicked source; Compare / Shape / Use use pinned fonts.
+    /// A mode asked for as a window of its own. The main window opens it and empties this again.
+    var detachRequest: WorkspaceWindow?
+    /// The windows of their own that are open right now.
+    var openWindows: Set<WorkspaceWindow> = []
+
+    /// Opens a mode in a window of its own. Preview takes the list or view on show along, or the one named.
+    func detach(_ tab: WorkspaceTab, source: LibraryFilter? = nil) {
+        guard tab == .preview else {
+            detachRequest = WorkspaceWindow(tab: tab, source: nil)
+            return
+        }
+        let shown = source ?? filter
+        detachRequest = WorkspaceWindow(tab: .preview, source: shown.key ?? LibraryFilter.all.key)
+    }
+
+    /// A mode that stands in a window of its own leaves the tabs of the main window. Preview always stays there.
+    func isDetached(_ tab: WorkspaceTab) -> Bool {
+        tab != .preview && openWindows.contains { $0.tab == tab }
+    }
+
+    func windowOpened(_ window: WorkspaceWindow) {
+        openWindows.insert(window)
+        if window.tab != .preview, workspaceTab == window.tab {
+            workspaceTab = .preview
+        }
+    }
+
+    func windowClosed(_ window: WorkspaceWindow) {
+        openWindows.remove(window)
+    }
     var workspaceTab: WorkspaceTab = WorkspaceTab(rawValue: UserDefaults.standard.string(forKey: "fontso.workspaceTab") ?? "") ?? .preview {
         didSet { UserDefaults.standard.set(workspaceTab.rawValue, forKey: "fontso.workspaceTab") }
     }
@@ -291,6 +416,7 @@ final class LibraryStore {
         do {
             let snapshot = try await Task.detached {
                 try database.seedStandardListsIfNeeded()
+                try database.ensureSystemFolders()
                 return LibrarySnapshot(
                     folders: try database.allFolders(),
                     fonts: try database.allFonts(),
@@ -308,6 +434,8 @@ final class LibraryStore {
             foundries = snapshot.foundries.sorted(by: foundryOrder)
             foundryFaces = snapshot.faces
             notices = snapshot.notices
+            newsLists = try database.allNewsLists()
+            newsListMembers = try database.allNewsListMembers()
             loadFoundryReadTimes()
             try reloadCollections()
             try importLegacyCompare()
@@ -343,15 +471,20 @@ final class LibraryStore {
         searchFocusToken += 1
     }
 
-    private var viewingTrialList: Bool {
-        if case .category(.trial) = filter { return true }
-        return false
+    var visibleFaces: [FontFace] {
+        let key = "\(listRevision)|\(fonts.count)|\(query)|\(searchFields.map(\.rawValue).sorted().joined(separator: ","))|\(showTrials)|\(onlyActive)|\(onlyVariable)|\(onlyLicensed)|\(formatFilter.rawValue)|\(String(describing: filter))\(pinKey)"
+        if key == visibleKey { return visibleCache }
+        let result = faces(in: filter, query: query)
+        visibleKey = key
+        visibleCache = result
+        return result
     }
 
-    var visibleFaces: [FontFace] {
-        let key = "\(listRevision)|\(fonts.count)|\(query)|\(searchFields.map(\.rawValue).sorted().joined(separator: ","))|\(showTrials)|\(onlyActive)|\(onlyVariable)|\(onlyLicensed)|\(formatFilter.rawValue)|\(String(describing: filter))"
-        if key == visibleKey { return visibleCache }
-        let suppressTrials = !showTrials && !viewingTrialList
+    /// The fonts of one view that the search and the filters let through.
+    private func faces(in filter: LibraryFilter, query: String) -> [FontFace] {
+        let trialList: Bool
+        if case .category(.trial) = filter { trialList = true } else { trialList = false }
+        let suppressTrials = !showTrials && !trialList
         let terms = SearchScope.terms(in: query)
         let wantActive = onlyActive
         let wantVariable = onlyVariable
@@ -365,22 +498,43 @@ final class LibraryStore {
             if !format.admits(face) { return false }
             return SearchScope.matches(face, terms: terms, fields: searchFields)
         }
-        let result: [FontFace]
         if case .compare(let id) = filter {
             let known = facesKeyedByIdentity
-            result = (compareMembers[id] ?? []).compactMap { known[$0] }.filter(passes)
-        } else {
-            result = fonts.filter { face in
-                matches(filter, face: face) && passes(face)
-            }
+            return (compareMembers[id] ?? []).compactMap { known[$0] }.filter(passes)
         }
-        visibleKey = key
-        visibleCache = result
-        return result
+        if filter == .pinned {
+            return pinnedFaces.filter(passes)
+        }
+        return fonts.filter { face in
+            matches(filter, face: face) && passes(face)
+        }
     }
 
     @ObservationIgnored private var visibleKey = ""
     @ObservationIgnored private var visibleCache: [FontFace] = []
+
+    /// The pinned fonts as part of a cache key, while the Pinned view is open: pinning changes what it shows.
+    private var pinKey: String {
+        filter == .pinned ? "|" + pinnedIdentities.joined(separator: ",") : ""
+    }
+
+    /// How many fonts of the whole library the search finds, whatever view is open. Asked when the open view
+    /// has no match, to say where the font is.
+    var libraryMatchCount: Int {
+        let terms = SearchScope.terms(in: query)
+        guard !terms.isEmpty else { return 0 }
+        let fields = searchFields
+        return fonts.reduce(0) { $0 + (SearchScope.matches($1, terms: terms, fields: fields) ? 1 : 0) }
+    }
+
+    /// Opens All fonts and keeps the search, which a change of view would otherwise empty.
+    func searchWholeLibrary() {
+        guard filter != .all else { return }
+        keepsQueryOnce = true
+        filter = .all
+    }
+
+    @ObservationIgnored private var keepsQueryOnce = false
 
     /// How many of the view's fonts the search and filters currently hide, in the unit the user counts in.
     var filterFootprint: (shown: Int, total: Int) {
@@ -535,7 +689,11 @@ final class LibraryStore {
 
     /// Lists open in the user's own order; the library keeps its last sort. The search starts fresh in every view.
     func viewChanged(from old: LibraryFilter, to new: LibraryFilter) {
-        if !query.isEmpty { query = "" }
+        if keepsQueryOnce {
+            keepsQueryOnce = false
+        } else if !query.isEmpty {
+            query = ""
+        }
         let wasList: Bool
         if case .group = old { wasList = true } else { wasList = false }
         let isList: Bool
@@ -832,28 +990,9 @@ final class LibraryStore {
 
     var browseGroups: [BrowseGroup] {
         let fields = searchFields.map(\.rawValue).sorted().joined(separator: ",")
-        let key = "\(listRevision)|\(fonts.count)|\(query)|\(fields)|\(sort.rawValue)|\(sortAscending)|\(showTrials)|\(String(describing: filter))"
+        let key = "\(listRevision)|\(fonts.count)|\(query)|\(fields)|\(sort.rawValue)|\(sortAscending)|\(showTrials)|\(String(describing: filter))\(pinKey)"
         if key == browseKey { return browseCache }
-        let customOrder: [String]
-        if sort == .custom, case .group(let id) = filter {
-            // The list's own order first, then each sub-list's order in sidebar order.
-            var order: [String] = []
-            var seen: Set<String> = []
-            for member in listScope(id) {
-                for key in listOrder[member] ?? [] where seen.insert(key).inserted {
-                    order.append(key)
-                }
-            }
-            customOrder = order
-        } else {
-            customOrder = []
-        }
-        let groups = FontGrouping.browseGroups(
-            faces: visibleFaces,
-            sort: sort,
-            ascending: sortAscending,
-            customOrder: customOrder
-        )
+        let groups = grouped(visibleFaces, of: filter, sort: sort, ascending: sortAscending)
         var styles = 0
         var available = 0
         for group in groups {
@@ -871,6 +1010,77 @@ final class LibraryStore {
         return groups
     }
 
+    /// The fonts of a view in families, in the order the sort asks for. A list and the pinned fonts have an
+    /// order of their own.
+    private func grouped(_ faces: [FontFace], of filter: LibraryFilter, sort: LibrarySort, ascending: Bool) -> [BrowseGroup] {
+        var customOrder: [String] = []
+        if sort == .custom, case .group(let id) = filter {
+            // The list's own order first, then each sub-list's order in sidebar order.
+            var seen: Set<String> = []
+            for member in listScope(id) {
+                for key in listOrder[member] ?? [] where seen.insert(key).inserted {
+                    customOrder.append(key)
+                }
+            }
+        } else if sort == .custom, filter == .pinned {
+            customOrder = pinnedIdentities
+        }
+        return FontGrouping.browseGroups(faces: faces, sort: sort, ascending: ascending, customOrder: customOrder)
+    }
+
+    // MARK: Previews of their own
+
+    @ObservationIgnored private var scopes: [LibraryFilter: PreviewScope] = [:]
+
+    /// The preview of one list or view that does not follow the navigation. One per source, kept while the app runs.
+    func scope(for source: LibraryFilter) -> PreviewScope {
+        if let known = scopes[source] { return known }
+        let own: Bool
+        if case .group = source { own = true } else { own = source == .pinned }
+        let made = PreviewScope(source: source, sort: own ? .custom : (sort == .custom ? .automatic : sort))
+        scopes[source] = made
+        return made
+    }
+
+    private func refresh(_ scope: PreviewScope) {
+        let fields = searchFields.map(\.rawValue).sorted().joined(separator: ",")
+        let pins = scope.source == .pinned ? pinnedIdentities.joined(separator: ",") : ""
+        let key = "\(listRevision)|\(fonts.count)|\(scope.query)|\(fields)|\(scope.sort.rawValue)|\(scope.sortAscending)|\(showTrials)|\(pins)"
+        if key == scope.key { return }
+        let groups = grouped(faces(in: scope.source, query: scope.query), of: scope.source, sort: scope.sort, ascending: scope.sortAscending)
+        let stack = LibraryStore.stacked(groups)
+        scope.groups = groups
+        scope.faces = stack.faces
+        scope.headings = stack.headings
+        scope.key = key
+    }
+
+    func browseGroups(in scope: PreviewScope) -> [BrowseGroup] {
+        refresh(scope)
+        return scope.groups
+    }
+
+    func previewFaces(in scope: PreviewScope) -> [FontFace] {
+        refresh(scope)
+        return scope.faces
+    }
+
+    func previewHeadings(in scope: PreviewScope) -> [Int64: String] {
+        refresh(scope)
+        return scope.headings
+    }
+
+    /// Adds fonts to the list a preview shows. False when it shows no list or every font is in it already.
+    @discardableResult
+    func addToList(of filter: LibraryFilter, identities: [String]) -> Bool {
+        guard case .group(let id) = filter else { return false }
+        let members = membership[id] ?? []
+        let fresh = identities.filter { !members.contains($0) && hasFace(identity: $0) }
+        guard !fresh.isEmpty else { return false }
+        addToGroup(id, identities: fresh)
+        return true
+    }
+
     /// Bumped with every change to the library's contents; the sidebar counts only rebuild on this one.
     private var contentRevision = 0
 
@@ -879,10 +1089,13 @@ final class LibraryStore {
         contentRevision += 1
     }
 
-    var filterTitle: String {
+    var filterTitle: String { title(of: filter) }
+
+    func title(of filter: LibraryFilter) -> String {
         switch filter {
         case .all: return "All fonts"
-        case .available: return "Available"
+        case .available: return "Active"
+        case .pinned: return "Pinned"
         case .inactive: return "Inactive"
         case .variable: return "Variable fonts"
         case .webfonts: return "Webfonts"
@@ -902,7 +1115,9 @@ final class LibraryStore {
         case .shape(let id):
             return shapeSearches.first { $0.id == id }?.title ?? "Shape"
         case .news(let lane):
-            return lane == .seen ? "Old" : "New"
+            return lane == .seen ? "Seen" : "New"
+        case .newsList(let id):
+            return newsLists.first { $0.id == id }?.name ?? "News list"
         }
     }
 
@@ -914,7 +1129,10 @@ final class LibraryStore {
             return "Shape"
         }
         if case .news(let lane) = filter {
-            return lane == .seen ? "Old" : "New"
+            return lane == .seen ? "Seen" : "New"
+        }
+        if case .newsList(let id) = filter {
+            return newsLists.first { $0.id == id }?.name ?? "News list"
         }
         let groups = browseGroups
         let families = groups.reduce(0) { $0 + $1.families.count }
@@ -957,6 +1175,14 @@ final class LibraryStore {
     private func refreshPreviewOrder() {
         let groups = browseGroups
         if previewKey == browseKey, !previewKey.isEmpty { return }
+        let stack = LibraryStore.stacked(groups)
+        previewKey = browseKey
+        previewCache = stack.faces
+        previewHeadingCache = stack.headings
+    }
+
+    /// The cuts of the sorted families one under the other, and the name of every sort group at its first cut.
+    private static func stacked(_ groups: [BrowseGroup]) -> (faces: [FontFace], headings: [Int64: String]) {
         var result: [FontFace] = []
         var headings: [Int64: String] = [:]
         result.reserveCapacity(groups.reduce(0) { $0 + $1.families.reduce(0) { $0 + $1.faces.count } })
@@ -977,13 +1203,13 @@ final class LibraryStore {
                 headings[result[start].id] = group.title
             }
         }
-        previewKey = browseKey
-        previewCache = result
-        previewHeadingCache = headings
+        return (result, headings)
     }
 
     /// Fonts from the news or the web that were saved in the open list. They have no file in the library.
-    var previewListLinks: [OutsideFont] {
+    var previewListLinks: [OutsideFont] { listLinks(in: filter, query: query) }
+
+    func listLinks(in filter: LibraryFilter, query: String) -> [OutsideFont] {
         guard case .group(let id) = filter else { return [] }
         let links = listLinks[id] ?? []
         let terms = query.split(whereSeparator: \.isWhitespace).map(String.init)
@@ -1005,12 +1231,12 @@ final class LibraryStore {
         return pinnedFaces.first ?? previewFaces.first
     }
 
-    /// Fonts pinned for Compare, Shape, Mix, and Playground.
+    /// Fonts pinned for Compare, Shape, Mix, and Use.
     var pinnedFaces: [FontFace] {
         pinnedIdentities.compactMap { face(identity: $0) }
     }
 
-    /// The pin tray: Compare, Shape, Mix, and Playground work from these.
+    /// The pin tray: Compare, Shape, Mix, and Use work from these.
     var workingFaces: [FontFace] {
         pinnedFaces
     }
@@ -1160,9 +1386,9 @@ final class LibraryStore {
         }
     }
 
-    // MARK: Playground
+    // MARK: Use (Playground page)
 
-    /// Puts fonts on the Playground page as new blocks, set in the current sample text.
+    /// Puts fonts on the Use page as new blocks, set in the current sample text.
     func addToPlayground(_ identities: [String]) {
         let known = Set(fonts.map(\.identity))
         var seen = Set<String>()
@@ -1170,7 +1396,7 @@ final class LibraryStore {
         guard !valid.isEmpty else { return }
         let text = UserDefaults.standard.string(forKey: "fontso.sampleText") ?? SpecimenText.standard
         let added = PlaygroundDocument.shared.add(identities: valid, text: text)
-        statusText = added == 1 ? "Added to the Playground." : "\(added) fonts added to the Playground."
+        statusText = added == 1 ? "Added to Use." : "\(added) fonts added to Use."
     }
 
     // MARK: Pinned preview fonts
@@ -1229,7 +1455,7 @@ final class LibraryStore {
         pinnedIdentities.reverse()
     }
 
-    /// Pins fonts so Compare, Shape, Mix, and Playground can use them.
+    /// Pins fonts so Compare, Shape, Mix, and Use can use them.
     @discardableResult
     func addToPreview(_ identities: [String]) -> Bool {
         let valid = identities.filter { hasFace(identity: $0) }
@@ -1252,7 +1478,12 @@ final class LibraryStore {
             pendingWorkspaceTab = tab
             filter = .all
         default:
-            workspaceTab = tab
+            if isDetached(tab) {
+                // The mode stands in a window of its own: that one comes to the front.
+                detach(tab)
+            } else {
+                workspaceTab = tab
+            }
         }
     }
 
@@ -1263,10 +1494,11 @@ final class LibraryStore {
         pinnedIdentities.removeAll { $0 == face.identity }
     }
 
-    /// Highlights a cut, opens its Info under the navigation, and scrolls the stacked preview to it.
-    func selectInPreview(_ face: FontFace, scroll: Bool = true) {
+    /// Highlights a cut and scrolls the stacked preview to it. Its Info shows under the navigation when that
+    /// panel is open; only asking for Info by name opens a folded one.
+    func selectInPreview(_ face: FontFace, scroll: Bool = true, showInfo: Bool = false) {
         selection = [face.id]
-        infoPanelOpen = true
+        if showInfo { infoPanelOpen = true }
         if scroll {
             focusPreviewID = face.id
         }
@@ -1326,10 +1558,14 @@ final class LibraryStore {
 
     /// The families behind a row of the navigation. A list keeps its own order; a library view goes by name.
     func navigationFamilies(_ filter: LibraryFilter) -> [NavigationFamily] {
-        if case .group(let id) = filter {
+        // A list and the pinned fonts keep the order they were filed or pinned in.
+        var ordered: [FontFace]?
+        if case .group(let id) = filter { ordered = faces(inList: id) }
+        if filter == .pinned { ordered = pinnedFaces }
+        if let ordered {
             var order: [String] = []
             var byFamily: [String: [FontFace]] = [:]
-            for face in faces(inList: id) {
+            for face in ordered {
                 let key = face.family.lowercased()
                 if byFamily[key] == nil { order.append(key) }
                 byFamily[key, default: []].append(face)
@@ -1406,12 +1642,18 @@ final class LibraryStore {
 
     /// The number shown next to a view: families or styles, as the user prefers.
     func count(_ filter: LibraryFilter) -> Int {
+        if filter == .pinned {
+            // Counted fresh: the pinned fonts change with a click and are few. Always the cuts, as in the dock's
+            // Pinned section, since it is cuts that get pinned.
+            return pinnedFaces.count
+        }
         refreshCounts()
         guard let tally = countCache[filter] else { return 0 }
         return countFamilies ? tally.families.count + tally.extra : tally.styles + tally.extra
     }
 
     func styleCount(_ filter: LibraryFilter) -> Int {
+        if filter == .pinned { return pinnedFaces.count }
         refreshCounts()
         guard let tally = countCache[filter] else { return 0 }
         return tally.styles + tally.extra
@@ -1501,6 +1743,10 @@ final class LibraryStore {
     }
 
     func removeFolder(_ folder: FontFolder) {
+        guard !folder.isBuiltIn else {
+            alertMessage = "System Fonts stay in the library."
+            return
+        }
         guard let database else { return }
         do {
             try database.removeFolder(id: folder.id)
@@ -1519,6 +1765,14 @@ final class LibraryStore {
 
     func rescan() {
         refreshLibrary()
+    }
+
+    /// Drops rendered samples, Shape letter drawings, and unpacked webfonts. The next draw and open rebuild them.
+    func clearFontCaches() {
+        SampleLineCache.clear()
+        FontShape.resetCache()
+        WebfontUnpacker.clearCache()
+        statusText = "Font cache cleared."
     }
 
     private func refreshLibrary() {
@@ -2026,6 +2280,8 @@ final class LibraryStore {
             return !face.isWebfont
         case .favorites:
             return favoriteKeys.contains(face.identity)
+        case .pinned:
+            return pinnedIdentities.contains(face.identity)
         case .licensed:
             return isLicensed(face)
         case .category(let category):
@@ -2035,7 +2291,7 @@ final class LibraryStore {
             return face.filePath == folder.path || face.filePath.hasPrefix(folder.path + "/")
         case .group(let id):
             return isInList(id, face)
-        case .research, .compare, .shape, .news:
+        case .research, .compare, .shape, .news, .newsList:
             return false
         }
     }
@@ -2114,6 +2370,99 @@ final class LibraryStore {
         } catch {
             alertMessage = error.localizedDescription
         }
+    }
+
+    func commitNewNewsList() {
+        let name = newNewsListName
+        newNewsListName = ""
+        showNewNewsList = false
+        guard let database else { return }
+        do {
+            let list = try database.createNewsList(name: name)
+            newsLists.append(list)
+            newsLists.sort { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+            newsListMembers[list.id] = []
+            filter = .newsList(list.id)
+        } catch {
+            alertMessage = error.localizedDescription
+        }
+    }
+
+    func commitRenameNewsList() {
+        guard let list = newsListPendingRename, let database else { return }
+        let name = renameNewsListName
+        newsListPendingRename = nil
+        do {
+            try database.renameNewsList(id: list.id, name: name)
+            if let index = newsLists.firstIndex(where: { $0.id == list.id }) {
+                newsLists[index].name = name.cleanedFontName
+            }
+            newsLists.sort { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        } catch {
+            alertMessage = error.localizedDescription
+        }
+    }
+
+    func deleteNewsList(_ list: NewsList) {
+        guard let database else { return }
+        do {
+            try database.deleteNewsList(id: list.id)
+            newsLists.removeAll { $0.id == list.id }
+            newsListMembers[list.id] = nil
+            if case .newsList(let id) = filter, id == list.id {
+                filter = .news(.fresh)
+            }
+        } catch {
+            alertMessage = error.localizedDescription
+        }
+    }
+
+    func addNoticesToNewsList(_ listID: Int64, notices: [FoundryNotice]) {
+        guard let database, !notices.isEmpty else { return }
+        do {
+            for notice in notices {
+                try database.setNewsListMembership(listID: listID, noticeID: notice.id, on: true)
+                var members = newsListMembers[listID, default: []]
+                if !members.contains(notice.id) {
+                    members.append(notice.id)
+                    newsListMembers[listID] = members
+                }
+            }
+            statusText = notices.count == 1 ? "Added to the news list." : "\(notices.count) names added to the news list."
+        } catch {
+            alertMessage = error.localizedDescription
+        }
+    }
+
+    func removeNoticeFromNewsList(_ listID: Int64, notice: FoundryNotice) {
+        guard let database else { return }
+        do {
+            try database.setNewsListMembership(listID: listID, noticeID: notice.id, on: false)
+            newsListMembers[listID, default: []].removeAll { $0 == notice.id }
+        } catch {
+            alertMessage = error.localizedDescription
+        }
+    }
+
+    func notices(inNewsList id: Int64) -> [FoundryNotice] {
+        let ids = Set(newsListMembers[id, default: []])
+        return notices.filter { ids.contains($0.id) }
+            .sorted { ($0.publishedAt ?? $0.discoveredAt) > ($1.publishedAt ?? $1.discoveredAt) }
+    }
+
+    /// Files dragged news names onto a news list.
+    @discardableResult
+    func addDraggedNewsToList(_ listID: Int64, items: [FontDragItem]) -> Bool {
+        let matched = items.compactMap { item -> FoundryNotice? in
+            guard !item.outsideName.isEmpty else { return nil }
+            return notices.first {
+                $0.name == item.outsideName
+                    && ($0.url.absoluteString == item.outsideURL || item.outsideURL.isEmpty)
+            } ?? notices.first { $0.name == item.outsideName && $0.foundryName == item.outsideSource }
+        }
+        guard !matched.isEmpty else { return false }
+        addNoticesToNewsList(listID, notices: matched)
+        return true
     }
 
     func commitNewGroup() {

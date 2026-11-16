@@ -323,7 +323,25 @@ public struct FontFolder: Identifiable, Hashable, Sendable {
     public var addedAt: Date
 
     public var displayName: String {
-        URL(fileURLWithPath: path).lastPathComponent
+        let normalized = normalizeFontPath(path)
+        if SystemFontLocations.isProtected(path) { return "System Fonts" }
+        return URL(fileURLWithPath: path).lastPathComponent
+    }
+
+    /// System font folders stay in the navigation and cannot be removed from the library.
+    public var isBuiltIn: Bool {
+        SystemFontLocations.isProtected(path)
+    }
+}
+
+/// A list under News from Foundries, holding foundry notices filed by hand.
+public struct NewsList: Identifiable, Hashable, Sendable {
+    public var id: Int64
+    public var name: String
+
+    public init(id: Int64, name: String) {
+        self.id = id
+        self.name = name
     }
 }
 

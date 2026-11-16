@@ -875,7 +875,7 @@ struct PlaygroundExportSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Export the playground")
+            Text("Export Use")
                 .font(AppChrome.type(13, weight: .medium))
                 .foregroundStyle(AppChrome.ink)
                 .padding(.bottom, 2)
@@ -888,7 +888,7 @@ struct PlaygroundExportSheet: View {
             }
             switch options.paper {
             case .screen:
-                note("One page as wide as the Playground is now (\(Int(screenWidth)) pt) and as tall as the text.")
+                note("One page as wide as Use is now (\(Int(screenWidth)) pt) and as tall as the text.")
             case .a4, .a3:
                 row("Orientation") {
                     choice("Portrait", on: !options.landscape, help: "Upright page") { options.landscape = false }
@@ -1044,7 +1044,7 @@ enum PlaygroundPage {
 
     /// "Playground – Family, Family.pdf", with characters a file name must not hold taken out.
     static func fileName(families: [String], kind: PlaygroundExportKind) -> String {
-        var name = "Playground"
+        var name = "Use"
         if !families.isEmpty {
             let shown = families.prefix(4).joined(separator: ", ")
             let more = families.count > 4 ? " +\(families.count - 4)" : ""

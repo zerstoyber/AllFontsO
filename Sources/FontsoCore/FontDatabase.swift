@@ -53,10 +53,112 @@ public final class FontDatabase: @unchecked Sendable {
         }
     }
 
+    /// Keeps /System/Library/Fonts in the source list so system typefaces show under Source Folders.
+    public func ensureSystemFolders() throws {
+        let system = "/System/Library/Fonts"
+        guard FileManager.default.fileExists(atPath: system) else { return }
+        try addFolder(path: system)
+    }
+
+    public func allNewsLists() throws -> [NewsList] {
+        try queue.sync {
+            try query("SELECT id, name FROM news_lists ORDER BY name COLLATE NOCASE;") { statement in
+                NewsList(id: sqlite3_column_int64(statement, 0), name: columnText(statement, 1))
+            }
+        }
+    }
+
+    public func allNewsListMembers() throws -> [Int64: [Int64]] {
+        try queue.sync {
+            let rows: [(Int64, Int64)] = try query("SELECT list_id, notice_id FROM news_list_members;") { statement in
+                (sqlite3_column_int64(statement, 0), sqlite3_column_int64(statement, 1))
+            }
+            var result: [Int64: [Int64]] = [:]
+            for (list, notice) in rows {
+                result[list, default: []].append(notice)
+            }
+            return result
+        }
+    }
+
+    public func createNewsList(name: String) throws -> NewsList {
+        let trimmed = name.cleanedFontName
+        guard !trimmed.isEmpty else {
+            throw FontsoError.message("A list needs a name.")
+        }
+        return try queue.sync {
+            do {
+                try run(
+                    "INSERT INTO news_lists (name, created_at) VALUES (?, ?);",
+                    bindings: { statement in
+                        bind(statement, 1, trimmed)
+                        sqlite3_bind_double(statement, 2, Date().timeIntervalSince1970)
+                    }
+                )
+            } catch {
+                throw FontsoError.message("A list with this name already exists.")
+            }
+            guard let handle else { throw FontsoError.message("The library is not open.") }
+            return NewsList(id: sqlite3_last_insert_rowid(handle), name: trimmed)
+        }
+    }
+
+    public func renameNewsList(id: Int64, name: String) throws {
+        let trimmed = name.cleanedFontName
+        guard !trimmed.isEmpty else {
+            throw FontsoError.message("A list needs a name.")
+        }
+        try queue.sync {
+            do {
+                try run(
+                    "UPDATE news_lists SET name = ? WHERE id = ?;",
+                    bindings: { statement in
+                        bind(statement, 1, trimmed)
+                        sqlite3_bind_int64(statement, 2, id)
+                    }
+                )
+            } catch {
+                throw FontsoError.message("A list with this name already exists.")
+            }
+        }
+    }
+
+    public func deleteNewsList(id: Int64) throws {
+        try queue.sync {
+            try run("DELETE FROM news_list_members WHERE list_id = ?;", bindings: { sqlite3_bind_int64($0, 1, id) })
+            try run("DELETE FROM news_lists WHERE id = ?;", bindings: { sqlite3_bind_int64($0, 1, id) })
+        }
+    }
+
+    public func setNewsListMembership(listID: Int64, noticeID: Int64, on: Bool) throws {
+        try queue.sync {
+            if on {
+                try run(
+                    "INSERT OR IGNORE INTO news_list_members (list_id, notice_id) VALUES (?, ?);",
+                    bindings: { statement in
+                        sqlite3_bind_int64(statement, 1, listID)
+                        sqlite3_bind_int64(statement, 2, noticeID)
+                    }
+                )
+            } else {
+                try run(
+                    "DELETE FROM news_list_members WHERE list_id = ? AND notice_id = ?;",
+                    bindings: { statement in
+                        sqlite3_bind_int64(statement, 1, listID)
+                        sqlite3_bind_int64(statement, 2, noticeID)
+                    }
+                )
+            }
+        }
+    }
+
     public func removeFolder(id: Int64) throws {
         try queue.sync {
             let folders = try readFolders()
             guard let folder = folders.first(where: { $0.id == id }) else { return }
+            if folder.isBuiltIn {
+                throw FontsoError.message("System Fonts stay in the library.")
+            }
             let remaining = folders.filter { $0.id != id }.map(\.path)
             let fonts = try readFonts()
             try exec("BEGIN IMMEDIATE;")
@@ -1847,6 +1949,26 @@ public final class FontDatabase: @unchecked Sendable {
             );
             """
         )
+        try exec(
+            """
+            CREATE TABLE IF NOT EXISTS news_lists (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL UNIQUE,
+                created_at REAL NOT NULL
+            );
+            """
+        )
+        try exec(
+            """
+            CREATE TABLE IF NOT EXISTS news_list_members (
+                list_id INTEGER NOT NULL,
+                notice_id INTEGER NOT NULL,
+                PRIMARY KEY (list_id, notice_id),
+                FOREIGN KEY (list_id) REFERENCES news_lists(id) ON DELETE CASCADE,
+                FOREIGN KEY (notice_id) REFERENCES foundry_notices(id) ON DELETE CASCADE
+            );
+            """
+        )
     }
 
     private func pruneCollections() throws {
@@ -2096,12 +2218,16 @@ public final class FontDatabase: @unchecked Sendable {
     }
 
     private func readFolders() throws -> [FontFolder] {
-        try query("SELECT id, path, added_at FROM folders ORDER BY path COLLATE NOCASE;") { statement in
+        let folders = try query("SELECT id, path, added_at FROM folders ORDER BY path COLLATE NOCASE;") { statement in
             FontFolder(
                 id: sqlite3_column_int64(statement, 0),
                 path: columnText(statement, 1),
                 addedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 2))
             )
+        }
+        return folders.sorted { lhs, rhs in
+            if lhs.isBuiltIn != rhs.isBuiltIn { return lhs.isBuiltIn }
+            return lhs.displayName.localizedStandardCompare(rhs.displayName) == .orderedAscending
         }
     }
 

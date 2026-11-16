@@ -44,6 +44,8 @@ struct ResearchChatView: View {
     @State private var fontChips: [ChatFontChip] = []
     /// The suggested families that are unfolded into their cuts, by message and family.
     @State private var openCards: Set<String> = []
+    /// The sample text of the suggested fonts: the one Preview, Shape, and Compare show too.
+    @AppStorage("fontso.sampleText") private var sample = SpecimenText.standard
     @Environment(\.surface) private var surface
 
     var body: some View {
@@ -80,7 +82,7 @@ struct ResearchChatView: View {
                                 starters
                             }
                             if store.researchMessages.contains(where: { !$0.suggestions.isEmpty }) {
-                                Text("Click a card to select it and see its Info. Command-click adds another font, Shift-click selects a range.")
+                                Text("Click a card to select it. Command-click adds another font, Shift-click selects a range.")
                                     .font(AppChrome.small)
                                     .foregroundStyle(surface.muted)
                                     .fixedSize(horizontal: false, vertical: true)
@@ -158,24 +160,43 @@ struct ResearchChatView: View {
         store.isResearching && store.researchMessages.last?.imagePath.isEmpty == false
     }
 
-    /// The composer floats over the chat like the dock over the preview, and folds into a chip.
+    /// The dock of the chat, as in the preview: the sample text of the suggested fonts, its size and spacing, and
+    /// the message field. It folds into a chip.
     private var researchCard: some View {
         Group {
             if composerOpen {
-                // As wide as a message of your own and at the right, where your messages appear.
-                composer
-                    .frame(maxWidth: 520)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .background(DockBackground())
-                    .clipShape(RoundedRectangle(cornerRadius: AppChrome.dockRadius, style: .continuous))
-                    .frame(maxWidth: .infinity, alignment: .trailing)
+                ChromeDock(hideHelp: "Hide Text, Adjust, and the message field", onHide: { composerOpen = false }) {
+                    // Text and Adjust start folded: the chat is for writing, the samples are set now and then.
+                    DockSection("Text", key: "chat.sample", startsOpen: false) {
+                        SampleChips(text: $sample, face: store.selection.first.flatMap { store.face(id: $0) })
+                    } content: {
+                        TextField("Sample text of the suggested fonts", text: $sample, axis: .vertical)
+                            .textFieldStyle(.plain)
+                            .font(AppChrome.type())
+                            .foregroundStyle(surface.ink)
+                            .lineLimit(1...3)
+                            .frame(maxWidth: .infinity, alignment: .topLeading)
+                            .help("The sample text of every suggested font. It can also be typed into a font's sample itself.")
+                    }
+                    DockSection("Adjust", key: "chat.sizes", minWidth: 220, startsOpen: false) {
+                        UnitSegments()
+                    } content: {
+                        SampleAdjustRows()
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .help("Size, spacing, and line height of the samples, as in Preview")
+                    }
+                    DockSection("Message", key: "chat.message", minWidth: 300) {
+                    } content: {
+                        composer
+                    }
+                }
             } else {
-                DockPill(title: "Message", help: "Show the message field") {
+                DockPill(title: "Text · Adjust · Message", help: "Show the sample text, its size, and the message field") {
                     composerOpen = true
                 }
             }
         }
-        .padding(.horizontal, 16)
+        .padding(.horizontal, AppChrome.dockInset)
         .padding(.bottom, 12)
     }
 
@@ -224,11 +245,10 @@ struct ResearchChatView: View {
                 }
             }
             .frame(maxWidth: .infinity)
-            .frame(minHeight: 40, idealHeight: 56, maxHeight: 120)
+            .frame(minHeight: 34, idealHeight: 40, maxHeight: 120)
             composerActions
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 9)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var composerActions: some View {
@@ -240,9 +260,6 @@ struct ResearchChatView: View {
             .disabled(store.isResearching)
             .help("Find library fonts that look like a picture")
             Spacer(minLength: 8)
-            Button("Hide") { composerOpen = false }
-                .buttonStyle(.chip())
-                .help("Fold the message field away")
             Button("Send", action: send)
                 .buttonStyle(.chip(on: canSend))
                 .disabled(!canSend)
@@ -776,8 +793,11 @@ private struct ChatFontCard: View {
     @Environment(LibraryStore.self) private var store
     @Environment(\.surface) private var surface
     @AppStorage("fontso.sampleText") private var sample = SpecimenText.standard
-    @AppStorage("fontso.specimenSize") private var specimenSize = 48.0
-    @AppStorage("fontso.specimen.tracking") private var tracking = 0.0
+    @Environment(\.sampleSizes) private var sizes
+    private var specimenSize: Double { get { sizes.size } nonmutating set { sizes.size = newValue } }
+    private var tracking: Double { get { sizes.tracking } nonmutating set { sizes.tracking = newValue } }
+    private var leading: Double { get { sizes.leading } nonmutating set { sizes.leading = newValue } }
+    @State private var editorHeights: [Int64: CGFloat] = [:]
     var suggestion: ResearchSuggestion
     var open: Bool
     var onToggle: () -> Void
@@ -878,13 +898,13 @@ private struct ChatFontCard: View {
                     pinAllButton(family)
                 } else {
                     activationButton(face)
-                    IconChip(symbol: "plus.rectangle.on.rectangle", help: "To Playground: add this font as a new text block") {
+                    IconChip(symbol: "plus.rectangle.on.rectangle", help: "To Use: add this font as a new text block") {
                         store.addToPlayground([face.identity])
                     }
                     IconChip(
                         symbol: store.isPinned(face) ? "pin.fill" : "pin",
                         on: store.isPinned(face),
-                        help: store.isPinned(face) ? "Pinned for Compare, Shape, and Playground. Click to unpin." : "Pin this font for Compare, Shape, and Playground"
+                        help: store.isPinned(face) ? "Pinned for Compare, Shape, and Use. Click to unpin." : "Pin this font for Compare, Shape, and Use"
                     ) {
                         store.togglePin(face)
                     }
@@ -893,16 +913,16 @@ private struct ChatFontCard: View {
             .padding(.horizontal, 10)
             .padding(.top, 7)
             .padding(.bottom, 2)
-            sampleText(face)
+            sampleText(face, selected: selected)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .background {
-            Rectangle().fill(selected ? surface.selection : Color.clear)
+            Rectangle().fill(selected ? Color(nsColor: AppChrome.panelSelectedNS) : Color.clear)
         }
         .contentShape(Rectangle())
         .onTapGesture { onSelect(face) }
         .draggable(FontDragItem(identities: folded ? family.map(\.identity) : [face.identity]))
-        .help("Click to select it and see its Info. Command-click adds another font, Shift-click selects a range. Drag it onto a list, Pinned, or a mode of the preview.")
+        .help("Click to select it. Command-click adds another font, Shift-click selects a range. Drag it onto a list, Pinned, or a mode of the preview.")
         .contextMenu {
             Menu(folded ? "Add this family to list" : "Add this cut to list") {
                 if store.groups.isEmpty {
@@ -917,27 +937,27 @@ private struct ChatFontCard: View {
         }
     }
 
-    /// The sample text of the preview, in this cut. It follows the text and spacing set there, at a size that
-    /// lets several cards share the chat.
-    @ViewBuilder
-    private func sampleText(_ face: FontFace) -> some View {
-        let size = min(max(specimenSize, 14), 32)
-        let text = sample.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !text.isEmpty,
-           let font = SpecimenFont.make(path: face.filePath, index: face.faceIndex, size: size, variations: store.axisValues[face.id] ?? [:]) {
-            Text(text)
-                .font(Font(font as CTFont))
-                .tracking(tracking * size)
-                .foregroundStyle(surface.ink)
-                .lineLimit(3)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 12)
-                .padding(.top, 6)
-                .padding(.bottom, 12)
-        } else {
-            Color.clear.frame(height: 6)
-        }
+    /// The sample text in this cut, as a card of the preview shows it: the text, size, spacing, and line height
+    /// set under Text and Adjust. A click into it selects the cut and puts the cursor there, to type another text.
+    private func sampleText(_ face: FontFace, selected: Bool) -> some View {
+        SpecimenEditor(
+            text: $sample,
+            face: face,
+            pointSize: specimenSize,
+            tracking: tracking * specimenSize,
+            leading: leading,
+            textColor: AppChrome.inkNS,
+            background: selected ? AppChrome.panelSelectedNS : AppChrome.panelNS,
+            variations: store.axisValues[face.id] ?? [:],
+            measuredHeight: Binding(
+                get: { editorHeights[face.id] ?? 90 },
+                set: { editorHeights[face.id] = $0 }
+            ),
+            onFocus: { onSelect(face) }
+        )
+        .frame(maxWidth: .infinity, minHeight: max(editorHeights[face.id] ?? 90, 44), alignment: .topLeading)
+        .padding(.horizontal, 6)
+        .padding(.bottom, 6)
     }
 
     private func foldedLabel(_ face: FontFace, styles: Int) -> String {
@@ -977,7 +997,7 @@ private struct ChatFontCard: View {
         return IconChip(
             symbol: pinned ? "pin.fill" : "pin",
             on: pinned,
-            help: pinned ? "Every style of this family is pinned. Click to unpin them." : "Pin all \(faces.count) styles for Compare, Shape, and Playground"
+            help: pinned ? "Every style of this family is pinned. Click to unpin them." : "Pin all \(faces.count) styles for Compare, Shape, and Use"
         ) {
             if pinned {
                 let identities = Set(faces.map(\.identity))

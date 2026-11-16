@@ -738,7 +738,7 @@ struct FontBrowserView: View {
         Button(store.isPinned(face) ? "Unpin from preview" : "Pin in preview") {
             store.togglePin(face)
         }
-        Button("Add to Playground") {
+        Button("Add to Use") {
             store.addToPlayground([face.identity])
         }
         Divider()

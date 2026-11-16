@@ -35,7 +35,7 @@ struct ContentView: View {
         .onChange(of: store.selection) { _, selection in
             guard !selection.isEmpty, !store.outsideSelection.isEmpty else { return }
             switch store.filter {
-            case .shape, .news:
+            case .shape, .news, .newsList:
                 break
             default:
                 store.outsideSelection = []
@@ -52,6 +52,10 @@ struct ContentView: View {
                 break
             case (.news(let previous), .news(let next)):
                 if previous != next { store.outsideSelection = [] }
+            case (.newsList(let previous), .newsList(let next)):
+                if previous != next { store.outsideSelection = [] }
+            case (.news, .newsList), (.newsList, .news):
+                store.outsideSelection = []
             default:
                 store.outsideSelection = []
             }
@@ -101,6 +105,21 @@ struct ContentView: View {
             Button("Save") { store.commitRenameGroup() }
             Button("Cancel", role: .cancel) { store.groupPendingRename = nil }
         }
+        .alert("New news list", isPresented: Bindable(store).showNewNewsList) {
+            TextField("Name", text: Bindable(store).newNewsListName)
+            Button("Create") { store.commitNewNewsList() }
+            Button("Cancel", role: .cancel) {
+                store.newNewsListName = ""
+                store.showNewNewsList = false
+            }
+        } message: {
+            Text("Drag names from New or Seen onto the list to file them.")
+        }
+        .alert("Rename news list", isPresented: newsListRenamePresented) {
+            TextField("Name", text: Bindable(store).renameNewsListName)
+            Button("Save") { store.commitRenameNewsList() }
+            Button("Cancel", role: .cancel) { store.newsListPendingRename = nil }
+        }
         .alert("Rename", isPresented: titleRenamePresented) {
             TextField("Name", text: Bindable(store).renameTitle)
             Button("Save") { store.commitRenameTitle() }
@@ -114,6 +133,11 @@ struct ContentView: View {
             guard open else { return }
             openWindow(id: "review")
             store.showReview = false
+        }
+        .onChange(of: store.detachRequest) { _, window in
+            guard let window else { return }
+            openWindow(id: "workspace", value: window)
+            store.detachRequest = nil
         }
         .sheet(item: $helpTopic) { topic in
             HelpSheet(topic: topic)
@@ -139,17 +163,31 @@ struct ContentView: View {
             Text(AppChrome.versionText)
             Spacer(minLength: 8)
             lastAction
-            Button(store.previewExpanded ? "Show navigation" : "Hide navigation") {
+            IconChip(
+                symbol: "sidebar.left",
+                on: store.previewExpanded,
+                tall: true,
+                help: store.previewExpanded
+                    ? "Show navigation: the navigation comes back beside the preview"
+                    : "Hide navigation: the preview gets the whole window"
+            ) {
                 store.previewExpanded.toggle()
             }
-            .buttonStyle(.chip(on: store.previewExpanded))
-            .help(store.previewExpanded ? "Show the navigation beside the preview" : "Hide the navigation and give the preview the whole window")
             themeMenu
-            Button("Rescan") { store.rescan() }
-                .buttonStyle(.chip())
-                .disabled(store.isScanning || store.folders.isEmpty)
-                .help("Rescan the source folders")
+            IconChip(symbol: "arrow.clockwise", tall: true, help: "Rescan: read the source folders again") {
+                store.rescan()
+            }
+            .disabled(store.isScanning || store.folders.isEmpty)
+            IconChip(
+                symbol: "eraser",
+                tall: true,
+                help: "Clear font cache: drop rendered samples, Shape letter drawings, and unpacked webfonts. The next draw rebuilds them."
+            ) {
+                store.clearFontCaches()
+            }
         }
+        // The icons of the header in its own ink, not the grey of its text.
+        .paperColors(ink: AppChrome.ink, paper: AppChrome.window)
         .font(AppChrome.type(11))
         .foregroundStyle(AppChrome.muted)
         // In full screen there are no window buttons: the name lines up with the text of the navigation.
@@ -175,10 +213,10 @@ struct ContentView: View {
                 }
             }
         } label: {
-            Text("Theme")
+            Image(systemName: "circle.lefthalf.filled")
         }
-        .chromeMenuChip(compact: true)
-        .help("Dark, light, or the same as the Mac")
+        .chromeMenuChip(compact: true, icon: true)
+        .help("Theme: dark, light, or the same as the Mac")
     }
 
     @ViewBuilder
@@ -280,7 +318,7 @@ struct ContentView: View {
     /// News and the chat are no previews of fonts: they keep the colours of the theme.
     private var showsNews: Bool {
         switch store.filter {
-        case .news, .research: return true
+        case .news, .newsList, .research: return true
         default: return false
         }
     }
@@ -297,7 +335,7 @@ struct ContentView: View {
                     ResearchChatView()
                 }
             }
-        case .news:
+        case .news, .newsList:
             NewsView()
         default:
             SpecimenView()
@@ -315,6 +353,13 @@ struct ContentView: View {
         Binding(
             get: { store.groupPendingRename != nil },
             set: { if !$0 { store.groupPendingRename = nil } }
+        )
+    }
+
+    private var newsListRenamePresented: Binding<Bool> {
+        Binding(
+            get: { store.newsListPendingRename != nil },
+            set: { if !$0 { store.newsListPendingRename = nil } }
         )
     }
 
@@ -350,7 +395,7 @@ enum SidebarSection: String, CaseIterable, Identifiable {
         case .lists: return "Lists"
         case .folders: return "Source Folders"
         case .research: return "Chats"
-        case .news: return "News"
+        case .news: return "News from Foundries"
         }
     }
 }
@@ -643,7 +688,8 @@ struct SidebarView: View {
     private static func viewTitle(_ filter: LibraryFilter) -> String {
         switch filter {
         case .all: return "All fonts"
-        case .available: return "Available"
+        case .available: return "Active"
+        case .pinned: return "Pinned"
         case .inactive: return "Inactive"
         case .variable: return "Variable fonts"
         case .webfonts: return "Webfonts"
@@ -706,11 +752,15 @@ struct SidebarView: View {
 
     private func folderRow(_ folder: FontFolder) -> some View {
         viewRow(folder.displayName, filter: .folder(folder.id))
-            .help(folder.path)
+            .help(folder.isBuiltIn
+                ? "System fonts from macOS. They stay in the library and cannot be removed."
+                : folder.path)
             .contextMenu {
                 Button("Reveal in Finder") { store.reveal(path: folder.path) }
-                Button("Remove from library", role: .destructive) {
-                    store.folderPendingRemoval = folder
+                if !folder.isBuiltIn {
+                    Button("Remove from library", role: .destructive) {
+                        store.folderPendingRemoval = folder
+                    }
                 }
             }
     }
@@ -723,6 +773,8 @@ struct SidebarView: View {
             return store.mcpEnabled ? nil : ("New research chat", { store.createResearchChat() })
         case .folders:
             return ("New source folder", { store.createSourceFolder() })
+        case .news:
+            return ("New news list", { store.showNewNewsList = true })
         default:
             return nil
         }
@@ -807,8 +859,28 @@ struct SidebarView: View {
         case .news:
             SidebarDropRow(title: "New", filter: .news(.fresh), count: store.noticeCount(.fresh), badge: store.hasUnvisitedNews, onDrop: nil)
                 .help("Releases and names you have not marked as seen.")
-            sidebarRow("Old", filter: .news(.seen), count: store.noticeCount(.seen))
+            sidebarRow("Seen", filter: .news(.seen), count: store.noticeCount(.seen))
                 .help("Releases and names marked as seen.")
+            ForEach(store.newsLists) { list in
+                dropRow(
+                    list.name,
+                    filter: .newsList(list.id),
+                    count: store.newsListMembers[list.id, default: []].count,
+                    dragItem: FontDragItem(sidebarKind: "newsLists", sidebarID: list.id)
+                ) { items, _ in
+                    store.addDraggedNewsToList(list.id, items: items)
+                }
+                .help("A list of names filed from News.")
+                .contextMenu {
+                    Button("Rename") {
+                        store.newsListPendingRename = list
+                        store.renameNewsListName = list.name
+                    }
+                    Button("Delete list", role: .destructive) {
+                        store.deleteNewsList(list)
+                    }
+                }
+            }
         case .folders:
             ForEach(store.folders) { folder in
                 tracked(folderRow(folder), .folder(folder.id))
@@ -940,6 +1012,8 @@ struct SidebarView: View {
             }
         )
         .contextMenu {
+            Button("Open in its own window") { store.detach(.preview, source: .group(group.id)) }
+            Divider()
             Button("Rename") {
                 store.renameGroupName = group.name
                 store.groupPendingRename = group
@@ -1164,7 +1238,7 @@ private struct SidebarFamilyRow: View {
             store.selectInPreview(family.lead)
         }
         .draggable(FontDragItem(identities: faces.map(\.identity)))
-        .help("Click to show \(family.name) in the preview and in Info. Drag it onto Pinned, Compare, Shape, or Playground.")
+        .help("Click to show \(family.name) in the preview and in Info. Drag it onto Pinned, Compare, Shape, or Use.")
         .contextMenu {
             Button(pinned ? "Unpin" : (faces.count == 1 ? "Pin" : "Pin all \(faces.count) styles")) {
                 if pinned {
@@ -1174,7 +1248,7 @@ private struct SidebarFamilyRow: View {
                     store.addToPreview(faces.map(\.identity))
                 }
             }
-            Button("Send to Playground") { store.addToPlayground([family.lead.identity]) }
+            Button("Send to Use") { store.addToPlayground([family.lead.identity]) }
         }
     }
 }
@@ -1375,9 +1449,14 @@ struct FontsoCommands: Commands {
                 .keyboardShortcut("g", modifiers: [.command, .shift])
             Button("New list…") { store.showNewGroup = true }
             Button("Shape") { store.openWorkspace(.shape) }
+            Menu("Open in own window") {
+                ForEach(WorkspaceTab.allCases) { tab in
+                    Button(tab.title) { store.detach(tab) }
+                }
+            }
             Button("New research chat") { store.createResearchChat() }
                 .disabled(store.mcpEnabled)
-            Button("News") { store.filter = .news(.fresh) }
+            Button("News from Foundries") { store.filter = .news(.fresh) }
             Button("Foundries…") { store.showFoundries = true }
             Button("Review library…") { store.showReview = true }
             Button("Organize on disk…") { store.organizeOnDisk() }

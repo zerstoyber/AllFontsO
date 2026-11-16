@@ -134,6 +134,7 @@ enum LibraryFilter: Hashable {
     case desktop
     case favorites
     case licensed
+    case pinned
     case category(FontCategory)
     case folder(Int64)
     case group(Int64)
@@ -141,6 +142,7 @@ enum LibraryFilter: Hashable {
     case compare(Int64)
     case shape(Int64)
     case news(NewsLane)
+    case newsList(Int64)
 }
 
 struct BrowseGroup: Identifiable {

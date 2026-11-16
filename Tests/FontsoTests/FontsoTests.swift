@@ -512,6 +512,27 @@ final class FontsoTests: XCTestCase {
         XCTAssertEqual(turn.suggestions.map(\.role), ["Headline", "Fließtext"])
     }
 
+        func testFontImageMatchReturnsNilWithoutInk() {
+        // An empty bitmap has no letterforms to compare.
+        let width = 8
+        let height = 8
+        var pixels = [UInt8](repeating: 255, count: width * height * 4)
+        let image = pixels.withUnsafeMutableBytes { buffer -> CGImage? in
+            guard let context = CGContext(
+                data: buffer.baseAddress,
+                width: width,
+                height: height,
+                bitsPerComponent: 8,
+                bytesPerRow: width * 4,
+                space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+            ) else { return nil }
+            return context.makeImage()
+        }
+        XCTAssertNotNil(image)
+        XCTAssertNil(FontImageMatch.rank(image: image!, faces: [], limit: 4))
+    }
+
     func testPinnedFontsCanBeMovedAndSorted() {
         let order = ["a", "b", "c", "d"]
         // A font dragged in front of another leaves its old place.

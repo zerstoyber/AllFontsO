@@ -5,6 +5,11 @@ public struct FormNeighbor: Sendable, Identifiable, Equatable {
     public let score: Int
 
     public var id: Int64 { face.id }
+
+    public init(face: FontFace, score: Int) {
+        self.face = face
+        self.score = score
+    }
 }
 
 /// Which measurements a shape search compares, and which letters it draws for the outline pass.

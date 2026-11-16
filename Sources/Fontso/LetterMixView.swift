@@ -10,10 +10,11 @@ struct LetterMixView: View {
     @Environment(LibraryStore.self) private var store
     /// The sample text of Preview, Compare, and Shape: what is typed in one shows in all.
     @AppStorage("fontso.sampleText") private var text = SpecimenText.standard
-    @AppStorage("fontso.specimenSize") private var size = 48.0
+    @Environment(\.sampleSizes) private var sizes
+    private var size: Double { get { sizes.size } nonmutating set { sizes.size = newValue } }
+    private var tracking: Double { get { sizes.tracking } nonmutating set { sizes.tracking = newValue } }
+    private var leading: Double { get { sizes.leading } nonmutating set { sizes.leading = newValue } }
     @AppStorage("fontso.specimen.unit") private var unitRaw = SpecimenUnit.point.rawValue
-    @AppStorage("fontso.specimen.tracking") private var tracking = 0.0
-    @AppStorage("fontso.specimen.leading") private var leading = 1.2
     /// A mix starts from the pinned cuts.
     @AppStorage("fontso.mix.cuts") private var sourceRaw = MixSource.chosen.rawValue
     @AppStorage("fontso.mix.count") private var count = 6
@@ -164,6 +165,7 @@ struct LetterMixView: View {
                         .help("The sample text: the same one Preview, Compare, and Match show. The mix sets its letters.")
                 }
                 DockSection("Adjust", key: "mix.adjust") {
+                    SizeLinkChip()
                     UnitSegments()
                 } content: {
                     SampleAdjustRows()
@@ -547,10 +549,10 @@ struct LetterMixView: View {
         let known = store.facesKeyedByIdentity
         let assigned = assignment(MixText.letters(in: text), cuts: cuts, known: known)
         let letters = assigned.map { MixLetter(at: $0.key, font: $0.value.identity) }.sorted { $0.at < $1.at }
-        PlaygroundDocument.shared.change(undoManager, "Add Mix to Playground") {
+        PlaygroundDocument.shared.change(undoManager, "Add Mix to Use") {
             PlaygroundDocument.shared.addMix(text: text, letters: letters, size: size, tracking: tracking, leading: leading)
         }
-        store.statusText = "Mix added to the Playground."
+        store.statusText = "Mix added to Use."
     }
 
     private func mix(_ value: UInt64) -> UInt64 {

@@ -60,6 +60,15 @@ public enum WebfontUnpacker {
         return base.appendingPathComponent("Fontso/webfonts", isDirectory: true)
     }
 
+    /// Removes every unpacked webfont. The next open builds a fresh copy.
+    public static func clearCache() {
+        lock.lock()
+        defer { lock.unlock() }
+        let directory = cacheDirectory()
+        guard FileManager.default.fileExists(atPath: directory.path) else { return }
+        try? FileManager.default.removeItem(at: directory)
+    }
+
     private static func stableHash(_ text: String) -> String {
         var hash: UInt64 = 14_695_981_039_346_656_037
         for byte in text.utf8 {

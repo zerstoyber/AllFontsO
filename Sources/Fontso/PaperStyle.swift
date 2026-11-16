@@ -235,7 +235,7 @@ private struct PaperButtonBody: View {
             .lineLimit(1)
             .foregroundStyle(prominent ? paper : ink)
             .padding(.horizontal, compact ? 6 : 8)
-            .padding(.vertical, compact ? 2.5 : 4)
+            .frame(height: compact ? ChipMetrics.compactHeight : ChipMetrics.height)
             .background(fill, in: RoundedRectangle(cornerRadius: 4, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 4, style: .continuous)

@@ -12,9 +12,9 @@ struct NewsView: View {
     @Environment(\.surface) private var surface
 
     var body: some View {
-        let items = lane == .seen ? seen : fresh
+        let items = currentItems
         VStack(spacing: 0) {
-            PaneTitle(title: "News", detail: lane == .seen ? "Old" : "New") {
+            PaneTitle(title: "News from Foundries", detail: paneDetail) {
                 let reading = store.isCheckingNews || store.isReadingFoundries
                 if reading {
                     ProgressView().controlSize(.mini)
@@ -117,7 +117,7 @@ struct NewsView: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     if items.isEmpty && !store.isReadingFoundries && !store.isCheckingNews {
-                        Text(lane == .seen ? "Nothing has been marked as seen." : "No new name or post is waiting.")
+                        Text(emptyListCopy)
                             .font(AppChrome.type())
                             .foregroundStyle(surface.muted)
                             .padding(12)
@@ -129,9 +129,7 @@ struct NewsView: View {
                             .frame(height: 0.5)
                             .padding(.horizontal, 8)
                     }
-                    Text(lane == .seen
-                        ? "Names and posts you marked as seen. No font file is downloaded."
-                        : "New names from each foundry’s own site, and posts from its RSS feed when it has one. No font file is downloaded.")
+                    Text(footerCopy)
                         .font(AppChrome.small)
                         .foregroundStyle(surface.muted)
                         .fixedSize(horizontal: false, vertical: true)
@@ -172,6 +170,41 @@ struct NewsView: View {
         return .fresh
     }
 
+    private var currentItems: [FoundryNotice] {
+        if case .newsList(let id) = store.filter {
+            return store.notices(inNewsList: id)
+        }
+        return lane == .seen ? seen : fresh
+    }
+
+    private var paneDetail: String {
+        if case .newsList(let id) = store.filter {
+            return store.newsLists.first { $0.id == id }?.name ?? "List"
+        }
+        return lane == .seen ? "Seen" : "New"
+    }
+
+    private var showsSeenAction: Bool {
+        if case .news(.fresh) = store.filter { return true }
+        return false
+    }
+
+    private var emptyListCopy: String {
+        if case .newsList = store.filter {
+            return "Nothing in this list yet. Drag names from New or Seen onto it."
+        }
+        return lane == .seen ? "Nothing has been marked as seen." : "No new name or post is waiting."
+    }
+
+    private var footerCopy: String {
+        if case .newsList = store.filter {
+            return "Names filed in this list. No font file is downloaded."
+        }
+        return lane == .seen
+            ? "Names and posts you marked as seen. No font file is downloaded."
+            : "New names from each foundry’s own site, and posts from its RSS feed when it has one. No font file is downloaded."
+    }
+
     /// The newest first: by the day a post was published, or the day a name was found on the foundry's site.
     private var fresh: [FoundryNotice] {
         openNotices
@@ -203,7 +236,7 @@ struct NewsView: View {
             Text("You are not following a foundry yet.")
                 .font(AppChrome.type(12, weight: .medium))
                 .foregroundStyle(surface.ink)
-            Text("Follow a foundry, or add your own. New names then sort into News, New, and Old.")
+            Text("Follow a foundry, or add your own. New names then sort into News from Foundries, New, and Seen.")
                 .font(AppChrome.type())
                 .foregroundStyle(surface.half)
                 .fixedSize(horizontal: false, vertical: true)
@@ -262,9 +295,9 @@ struct NewsView: View {
                 .lineLimit(1)
             Spacer(minLength: 4)
             if chosen.count > 1 {
-                if lane == .fresh {
+                if showsSeenAction {
                     Button("Seen") { markSeen(chosen) }
-                        .help("Move the \(chosen.count) selected to Old")
+                        .help("Move the \(chosen.count) selected to Seen")
                 }
                 Button("Remove") { remove(chosen) }
                     .help("Remove the \(chosen.count) selected from News")
@@ -323,7 +356,7 @@ struct NewsView: View {
             HStack(spacing: 4) {
                 if !notice.seen {
                     Button("Seen") { markSeen(batch) }
-                        .help(batch.count > 1 ? "Mark the \(batch.count) selected as seen" : "Mark as seen: it moves to Old")
+                        .help(batch.count > 1 ? "Mark the \(batch.count) selected as seen" : "Mark as seen: it moves to Seen")
                 }
                 Button("Remove") { remove(batch) }
                     .help(batch.count > 1 ? "Remove the \(batch.count) selected" : "Remove it from News")
@@ -347,8 +380,16 @@ struct NewsView: View {
             listMenuItems(item)
             Divider()
             Button("Edit…") { editingOutside = item }
-            if lane == .fresh {
+            if showsSeenAction {
                 Button(batch.count > 1 ? "Mark \(batch.count) as seen" : "Mark as seen") { markSeen(batch) }
+            }
+            if case .newsList(let listID) = store.filter {
+                Button(batch.count > 1 ? "Remove \(batch.count) from this list" : "Remove from this list") {
+                    for notice in batch {
+                        store.removeNoticeFromNewsList(listID, notice: notice)
+                    }
+                    clearSelection(batch)
+                }
             }
             Button(batch.count > 1 ? "Remove \(batch.count)" : "Remove", role: .destructive) { remove(batch) }
         }
@@ -356,10 +397,21 @@ struct NewsView: View {
 
     @ViewBuilder
     private func listMenuItems(_ item: OutsideFont) -> some View {
+        if !store.newsLists.isEmpty, let notice = notice(for: item) {
+            Menu("Add to news list") {
+                ForEach(store.newsLists) { list in
+                    Button(list.name) {
+                        store.addNoticesToNewsList(list.id, notices: [notice])
+                    }
+                }
+            }
+        }
+        Button("New news list…") { store.showNewNewsList = true }
+        Divider()
         if store.groups.isEmpty {
-            Button("New list…") { store.showNewGroup = true }
+            Button("New library list…") { store.showNewGroup = true }
         } else {
-            Menu("Add to list") {
+            Menu("Add to library list") {
                 ForEach(store.menuGroups) { group in
                     Button(store.menuTitle(group)) {
                         store.addListLink(group.id, name: item.name, source: item.source, url: item.url)
@@ -367,6 +419,10 @@ struct NewsView: View {
                 }
             }
         }
+    }
+
+    private func notice(for item: OutsideFont) -> FoundryNotice? {
+        store.notices.first { $0.name == item.name && $0.foundryName == item.source }
     }
 
     private func dateLine(_ notice: FoundryNotice) -> String {

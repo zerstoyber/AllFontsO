@@ -58,6 +58,11 @@ enum AppChrome {
         dark: .white,
         light: NSColor(srgbRed: 31 / 255, green: 31 / 255, blue: 31 / 255, alpha: 1)
     )
+    /// The panel under a selected card: the panel, a step towards the ink. Opaque, for views that draw their own ground.
+    static let panelSelectedNS = themed(
+        dark: NSColor(srgbRed: 63 / 255, green: 63 / 255, blue: 63 / 255, alpha: 1),
+        light: NSColor(srgbRed: 213 / 255, green: 213 / 255, blue: 213 / 255, alpha: 1)
+    )
 
     /// The Mac's own typeface, San Francisco, at a fixed size.
     static func type(_ size: CGFloat = textSize, weight: Font.Weight = .regular) -> Font {
@@ -86,7 +91,7 @@ enum AppChrome {
 
     /// The version the bundle carries. Run outside a bundle, as in a debug build, it is the current one.
     static var version: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.1"
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.2"
     }
 
     static var versionText: String {
@@ -145,9 +150,46 @@ struct ChromeSheet: ViewModifier {
     func body(content: Content) -> some View {
         content
             .paperColors(ink: AppChrome.ink, paper: AppChrome.panel)
-            .environment(\.colorScheme, theme.themeDark ? .dark : .light)
             .font(AppChrome.type())
-            .background(AppChrome.panel)
+            // Under the arrow of a popover too.
+            .background { Rectangle().fill(AppChrome.panel).ignoresSafeArea() }
+            .background(ThemeWindow(dark: theme.themeDark))
+            // Last, so the ground above is dark or light with the theme too, and not with the paper it was
+            // opened from: a light ground under light text otherwise.
+            .environment(\.colorScheme, theme.themeDark ? .dark : .light)
+    }
+}
+
+/// Gives the window of a popover or sheet the appearance of the theme. Opened from a paper of the other
+/// brightness, the window itself would be light under light text or dark under dark text: its own ground and
+/// its system controls go by the window, the labels by the theme.
+private struct ThemeWindow: NSViewRepresentable {
+    var dark: Bool
+
+    func makeNSView(context: Context) -> Probe {
+        let view = Probe()
+        view.dark = dark
+        return view
+    }
+
+    func updateNSView(_ view: Probe, context: Context) {
+        view.dark = dark
+        view.apply()
+    }
+
+    final class Probe: NSView {
+        var dark = true
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            apply()
+        }
+
+        func apply() {
+            let name: NSAppearance.Name = dark ? .darkAqua : .aqua
+            guard let window, window.appearance?.name != name else { return }
+            window.appearance = NSAppearance(named: name)
+        }
     }
 }
 
@@ -162,18 +204,21 @@ private struct ChromeDefaults: ViewModifier {
     }
 }
 
-/// The small chevron of the sketch: down when open, up when folded.
+/// The small chevron of a part that folds. It points where a click takes the content: down while folded, since
+/// the content then opens under the title, and up while open, since it folds back into the title.
 struct ChromeChevron: View {
     var open: Bool
     var color: Color?
     var size: CGFloat = 7
     /// Sideways for the sections of the dock: left when open, right when folded.
     var sideways = false
+    /// For what comes up from the bottom edge, like the dock: down while open, up while hidden.
+    var rises = false
     @Environment(\.surface) private var surface
 
     private var symbol: String {
         if sideways { return open ? "chevron.left" : "chevron.right" }
-        return open ? "chevron.down" : "chevron.up"
+        return open != rises ? "chevron.up" : "chevron.down"
     }
 
     var body: some View {

@@ -100,6 +100,9 @@ struct AddFontButton: View {
             }
             .padding(12)
             .frame(width: 320)
+            // On the colours of the theme: opened from a light paper in the dark theme it would set dark text
+            // on the dark popover.
+            .modifier(ChromeSheet())
         }
     }
 

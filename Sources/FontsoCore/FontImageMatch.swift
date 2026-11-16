@@ -2,15 +2,44 @@ import CoreGraphics
 import Foundation
 import Vision
 
+public struct ImageMatchHit: Sendable {
+    public var family: String
+    public var distance: Float
+    public init(family: String, distance: Float) {
+        self.family = family
+        self.distance = distance
+    }
+}
+
+public struct ImageMatchResult: Sendable {
+    public var sample: String
+    public var hits: [ImageMatchHit]
+    public init(sample: String, hits: [ImageMatchHit]) {
+        self.sample = sample
+        self.hits = hits
+    }
+}
+
 public enum FontImageMatch {
     /// Compares the picture with one regular face per family and returns the closest letterforms.
     public static func match(image: CGImage, faces: [FontFace], note: String, limit: Int = 8) -> ResearchTurn {
-        let sample = recognizedSample(in: image)
-        guard let reference = grid(from: image) else {
+        guard let ranked = rank(image: image, faces: faces, limit: limit) else {
             return ResearchTurn(text: emptyCopy(note), suggestions: [])
         }
+        let list = ranked.hits.map(\.family)
+        guard !list.isEmpty else {
+            return ResearchTurn(text: emptyCopy(note), suggestions: [])
+        }
+        let suggestions = list.map { ResearchSuggestion(family: $0, role: "", reason: "") }
+        return ResearchTurn(text: summary(list, note: note, sample: ranked.sample), suggestions: suggestions)
+    }
+
+    /// Same ranking Shape › Match uses: OCR text from the picture, then the closest drawn letterforms in the library.
+    public static func rank(image: CGImage, faces: [FontFace], limit: Int = 36) -> ImageMatchResult? {
+        let sample = recognizedSample(in: image)
+        guard let reference = grid(from: image) else { return nil }
         let representatives = representatives(in: faces)
-        var scored: [(family: String, distance: Float)] = []
+        var scored: [ImageMatchHit] = []
         scored.reserveCapacity(representatives.count)
         for face in representatives {
             guard let rendered = SpecimenRenderer.line(
@@ -19,16 +48,13 @@ public enum FontImageMatch {
                 text: sample,
                 pointSize: 64
             ), let candidate = grid(from: rendered) else { continue }
-            scored.append((face.family, distance(reference, candidate)))
+            scored.append(ImageMatchHit(family: face.family, distance: distance(reference, candidate)))
         }
         scored.sort { $0.distance < $1.distance }
-        let names = uniqueFamilies(scored.map(\.family)).prefix(limit)
-        let list = Array(names)
-        guard !list.isEmpty else {
-            return ResearchTurn(text: emptyCopy(note), suggestions: [])
-        }
-        let suggestions = list.map { ResearchSuggestion(family: $0, role: "", reason: "") }
-        return ResearchTurn(text: summary(list, note: note, sample: sample), suggestions: suggestions)
+        let unique = uniqueFamilies(scored.map(\.family)).prefix(limit)
+        let keyed = Dictionary(uniqueKeysWithValues: scored.map { ($0.family.lowercased(), $0) })
+        let hits = unique.compactMap { keyed[$0.lowercased()] }
+        return ImageMatchResult(sample: sample, hits: hits)
     }
 
     private static func representatives(in faces: [FontFace]) -> [FontFace] {

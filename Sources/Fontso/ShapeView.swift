@@ -1,6 +1,7 @@
 import AppKit
 import FontsoCore
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// Shape: the pinned fonts in a row at the top, one of them the reference, and under it the library ranked by how
 /// close each family comes to that reference in its measurements and drawn letters.
@@ -9,9 +10,10 @@ struct ShapeView: View {
     @Environment(\.surface) private var surface
     @AppStorage("fontso.sampleText") private var sample = SpecimenText.standard
     /// Size, spacing, and line height are the ones Preview uses, so a match looks here as it does there.
-    @AppStorage("fontso.specimenSize") private var specimenSize = 48.0
-    @AppStorage("fontso.specimen.tracking") private var tracking = 0.0
-    @AppStorage("fontso.specimen.leading") private var leading = 1.2
+    @Environment(\.sampleSizes) private var sizes
+    private var specimenSize: Double { get { sizes.size } nonmutating set { sizes.size = newValue } }
+    private var tracking: Double { get { sizes.tracking } nonmutating set { sizes.tracking = newValue } }
+    private var leading: Double { get { sizes.leading } nonmutating set { sizes.leading = newValue } }
     @ObservedObject private var theme = PaperSettings.shared
     @State private var editorHeights: [Int64: CGFloat] = [:]
     @AppStorage("fontso.shapeSampleOpen") private var dockOpen = true
@@ -24,6 +26,10 @@ struct ShapeView: View {
     @State private var neighbors: [FormNeighbor] = []
     @State private var refining = false
     @State private var dropTargeted = false
+    /// A picture Match ranks the library against, instead of a pinned reference.
+    @State private var matchImage: NSImage?
+    @State private var matchSample = ""
+    @State private var imageDropTargeted = false
 
     var body: some View {
         let reference = reference
@@ -45,17 +51,30 @@ struct ShapeView: View {
             }
         }
         .overlay {
-            if dropTargeted {
+            if dropTargeted || imageDropTargeted {
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .stroke(surface.ink, lineWidth: 1)
                     .padding(6)
                     .allowsHitTesting(false)
             }
         }
-        // A font dropped anywhere on Shape is pinned and becomes the reference.
-        .dropDestination(for: FontDragItem.self) { items, _ in
-            adopt(items.flatMap(\.identities))
-        } isTargeted: { dropTargeted = $0 }
+        // A font dropped anywhere on Shape is pinned and becomes the reference. A picture ranks Match instead.
+        .onDrop(of: [UTType.json, UTType.image, UTType.fileURL], isTargeted: Binding(
+            get: { dropTargeted || imageDropTargeted },
+            set: { hovering in
+                dropTargeted = hovering
+                imageDropTargeted = hovering
+            }
+        )) { providers in
+            let fonts = providers.filter { $0.hasItemConformingToTypeIdentifier(UTType.json.identifier) }
+            if fonts.isEmpty {
+                return loadMatchImage(providers)
+            }
+            FontDragItem.load(fonts) { items in
+                _ = adopt(items.flatMap(\.identities))
+            }
+            return true
+        }
         .task(id: rankKey) {
             await rank()
         }
@@ -75,7 +94,13 @@ struct ShapeView: View {
                 ScrollViewReader { scroller in
                     ColumnScroll(bottomInset: dockHeight + 16) {
                         VStack(alignment: .leading, spacing: 12) {
-                            if let reference {
+                            if matchImage != nil {
+                                Text(imageMatchNote)
+                                    .font(AppChrome.small)
+                                    .foregroundStyle(surface.muted)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                imageReferenceCard
+                            } else if let reference {
                                 Text(matchNote(reference))
                                     .font(AppChrome.small)
                                     .foregroundStyle(surface.muted)
@@ -108,6 +133,7 @@ struct ShapeView: View {
                                 .help("The sample text of the reference and of every match")
                         }
                         DockSection("Adjust", key: "shape.adjust") {
+                            SizeLinkChip()
                             UnitSegments()
                         } content: {
                             SampleAdjustRows()
@@ -154,7 +180,7 @@ struct ShapeView: View {
             onChoose: { face in referenceIdentity = face.identity },
             onPick: { face in adopt([face.identity]) },
             menuExtra: store.shapeMode == .mix
-                ? [.init(title: "Send this mix to Playground") { NotificationCenter.default.post(name: .fontsoMixToPlayground, object: nil) }]
+                ? [.init(title: "Send this mix to Use") { NotificationCenter.default.post(name: .fontsoMixToPlayground, object: nil) }]
                 : []
         )
     }
@@ -192,7 +218,10 @@ struct ShapeView: View {
                         .foregroundStyle(surface.half)
                         .help("The matches below are measured against this font")
                 }
-                Button("Info") { select(face) }
+                Button("Info") {
+                    select(face)
+                    store.infoPanelOpen = true
+                }
                     .buttonStyle(.chip(on: selected))
                     .help(selected ? "Selected: its Info shows under the navigation" : "Select this cut and show its Info under the navigation")
                 Button(active ? (face.canDeactivate ? "Active" : face.activation.label) : "Activate") {
@@ -201,7 +230,7 @@ struct ShapeView: View {
                 .buttonStyle(.chip(on: active))
                 .disabled(!face.canActivate && !face.canDeactivate)
                 .help(active ? "Available to other apps. Click to deactivate it." : "Activate this file so other apps can use it.")
-                IconChip(symbol: "plus.rectangle.on.rectangle", help: "To Playground: add this font as a new text block") {
+                IconChip(symbol: "plus.rectangle.on.rectangle", help: "To Use: add this font as a new text block") {
                     store.addToPlayground([face.identity])
                 }
                 IconChip(
@@ -235,7 +264,7 @@ struct ShapeView: View {
             )
             .frame(
                 maxWidth: .infinity,
-                minHeight: max(editorHeights[face.id] ?? 120, specimenSize * max(leading, 1.2) + 48),
+                minHeight: max(editorHeights[face.id] ?? 120, 44),
                 alignment: .topLeading
             )
             .padding(.horizontal, 6)
@@ -294,22 +323,110 @@ struct ShapeView: View {
     /// the way back to the standard. Filled chips count. A narrow window breaks the row in two.
     private var tuningRow: some View {
         let tuning = tuning
+        let byImage = matchImage != nil
         return ViewThatFits(in: .horizontal) {
             HStack(spacing: 8) {
-                factorChips(tuning)
-                letterChips(tuning)
+                imageChip
+                if !byImage {
+                    factorChips(tuning)
+                    letterChips(tuning)
+                }
                 Spacer(minLength: 0)
-                standardChip(tuning)
+                if byImage {
+                    Button("Clear image") { clearMatchImage() }
+                        .buttonStyle(.chip())
+                        .help("Match against a pinned font again")
+                } else {
+                    standardChip(tuning)
+                }
             }
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 8) {
-                    factorChips(tuning)
-                    Spacer(minLength: 0)
-                    standardChip(tuning)
+                    imageChip
+                    if byImage {
+                        Button("Clear image") { clearMatchImage() }
+                            .buttonStyle(.chip())
+                            .help("Match against a pinned font again")
+                    } else {
+                        factorChips(tuning)
+                        Spacer(minLength: 0)
+                        standardChip(tuning)
+                    }
                 }
-                letterChips(tuning)
+                if !byImage {
+                    letterChips(tuning)
+                }
             }
         }
+    }
+
+    private var imageChip: some View {
+        HStack(spacing: 4) {
+            Button("Image") { pickMatchImage() }
+                .buttonStyle(.chip(on: matchImage != nil))
+                .help("Identify fonts from a picture: drop one here or choose a file. Match ranks the library by letterform.")
+            if let matchImage {
+                Image(nsImage: matchImage)
+                    .resizable()
+                    .interpolation(.high)
+                    .scaledToFit()
+                    .frame(width: 36, height: 22)
+                    .background(surface.card, in: RoundedRectangle(cornerRadius: 3, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 3, style: .continuous)
+                            .stroke(surface.hairline, lineWidth: 0.5)
+                    )
+                    .help(matchSample.isEmpty ? "The picture Match is ranking against" : "Read as “\(matchSample)”")
+            }
+        }
+        .fixedSize()
+    }
+
+    private var imageReferenceCard: some View {
+        HStack(alignment: .top, spacing: 12) {
+            if let matchImage {
+                Image(nsImage: matchImage)
+                    .resizable()
+                    .interpolation(.high)
+                    .scaledToFit()
+                    .frame(maxWidth: 280, maxHeight: 120, alignment: .leading)
+                    .background(Color(nsColor: theme.paper), in: RoundedRectangle(cornerRadius: AppChrome.cardRadius, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: AppChrome.cardRadius, style: .continuous)
+                            .stroke(surface.hairline, lineWidth: 0.5)
+                    )
+            }
+            VStack(alignment: .leading, spacing: 4) {
+                Text("From the picture")
+                    .font(AppChrome.type(12, weight: .medium))
+                    .foregroundStyle(surface.ink)
+                if !matchSample.isEmpty {
+                    Text("Read as “\(matchSample)”")
+                        .font(AppChrome.small)
+                        .foregroundStyle(surface.half)
+                }
+                Text("The library is ranked by how close each family’s letterforms come to this picture.")
+                    .font(AppChrome.small)
+                    .foregroundStyle(surface.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(surface.card, in: RoundedRectangle(cornerRadius: AppChrome.cardRadius, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: AppChrome.cardRadius, style: .continuous)
+                .stroke(surface.hairline, lineWidth: 0.5)
+        )
+    }
+
+    private var imageMatchNote: String {
+        if refining { return "Comparing letterforms to the picture…" }
+        if matchSample.isEmpty {
+            return "Closest to the picture."
+        }
+        return "Closest to the picture, set as “\(matchSample)”."
     }
 
     private func factorChips(_ tuning: MatchTuning) -> some View {
@@ -453,7 +570,11 @@ struct ShapeView: View {
     }
 
     private func emptyText(_ reference: FontFace?) -> String {
-        if reference == nil { return "No reference yet. Pin a font to start." }
+        if matchImage != nil {
+            if refining { return "Comparing letterforms to the picture…" }
+            return "No library font is close enough to that picture."
+        }
+        if reference == nil { return "No reference yet. Pin a font, or drop a picture on Match." }
         if refining { return "Drawing the letters of every family…" }
         if !tuning.comparesAnything { return "Switch on a measurement or the letters above." }
         return "No other family is close enough."
@@ -464,16 +585,27 @@ struct ShapeView: View {
         var reference: Int64
         var fontCount: Int
         var tuning: MatchTuning
+        var imageToken: Int
     }
 
     private var rankKey: RankKey {
-        RankKey(reference: reference?.id ?? -1, fontCount: store.fonts.count, tuning: tuning)
+        RankKey(
+            reference: reference?.id ?? -1,
+            fontCount: store.fonts.count,
+            tuning: tuning,
+            imageToken: matchImage.map { ObjectIdentifier($0).hashValue } ?? 0
+        )
     }
 
     private func rank() async {
+        if let image = matchImage?.cgImage(forProposedRect: nil, context: nil, hints: nil) {
+            await rankFromImage(image)
+            return
+        }
         guard let reference else {
             neighbors = []
             refining = false
+            matchSample = ""
             return
         }
         let library = store.fonts
@@ -490,6 +622,75 @@ struct ShapeView: View {
         if Task.isCancelled { return }
         neighbors = refined
         refining = false
+    }
+
+    private func rankFromImage(_ image: CGImage) async {
+        neighbors = []
+        refining = true
+        let library = store.fonts
+        let result = await Task.detached(priority: .userInitiated) {
+            FontImageMatch.rank(image: image, faces: library, limit: 36)
+        }.value
+        if Task.isCancelled { return }
+        guard let result else {
+            neighbors = []
+            matchSample = ""
+            refining = false
+            return
+        }
+        matchSample = result.sample
+        let byFamily = Dictionary(grouping: library, by: { $0.family.lowercased() })
+        var ranked: [FormNeighbor] = []
+        guard let best = result.hits.first?.distance else {
+            neighbors = []
+            refining = false
+            return
+        }
+        for hit in result.hits {
+            guard let face = byFamily[hit.family.lowercased()].flatMap({ group in
+                group.min { lhs, rhs in
+                    if lhs.isItalic != rhs.isItalic { return !lhs.isItalic }
+                    return abs(lhs.weightClass - 400) < abs(rhs.weightClass - 400)
+                }
+            }) else { continue }
+            // Turn grid distance into a percentage against the closest hit.
+            let score = best <= 0
+                ? 100
+                : min(100, max(0, Int((100 * Double(best) / Double(max(hit.distance, best))).rounded())))
+            ranked.append(FormNeighbor(face: face, score: score))
+        }
+        neighbors = ranked
+        refining = false
+    }
+
+    private func pickMatchImage() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.image]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        guard panel.runModal() == .OK, let url = panel.url, let image = NSImage(contentsOf: url) else { return }
+        matchImage = image
+    }
+
+    private func clearMatchImage() {
+        matchImage = nil
+        matchSample = ""
+    }
+
+    private func loadMatchImage(_ providers: [NSItemProvider]) -> Bool {
+        let type = UTType.image.identifier
+        guard let provider = providers.first(where: { $0.hasItemConformingToTypeIdentifier(type) }) else {
+            imageDropTargeted = false
+            return false
+        }
+        provider.loadDataRepresentation(forTypeIdentifier: type) { data, _ in
+            guard let data, let image = NSImage(data: data) else { return }
+            Task { @MainActor in
+                matchImage = image
+                imageDropTargeted = false
+            }
+        }
+        return true
     }
 
     // MARK: Selection
@@ -550,7 +751,6 @@ struct ShapeView: View {
         } else {
             store.selection = [face.id]
             store.outsideSelection = []
-            store.infoPanelOpen = true
             selectionAnchor = face.id
         }
     }

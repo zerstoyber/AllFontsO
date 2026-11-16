@@ -2,6 +2,7 @@ import AppKit
 import CoreText
 import FontsoCore
 import SwiftUI
+import UniformTypeIdentifiers
 import WebKit
 
 struct FoundryPageView: View {
@@ -210,12 +211,18 @@ struct SpecimenView: View {
     var role = Role.workspace
     /// The most room Info may take, so the navigation above keeps its share.
     var infoLimit: CGFloat = 600
+    /// The one mode a window of its own shows. Without it the view follows the tab chosen in the main window.
+    var fixedTab: WorkspaceTab? = nil
+    /// The list or library view a Preview window of its own keeps, whatever the navigation goes on to.
+    var fixedSource: LibraryFilter? = nil
     @Environment(LibraryStore.self) private var store
     @AppStorage("fontso.sampleText") private var specimenText = SpecimenText.standard
-    @AppStorage("fontso.specimenSize") private var specimenSize = 48.0
+    /// Size, spacing, and line height of the window this view sits in.
+    @Environment(\.sampleSizes) private var sizes
+    private var specimenSize: Double { get { sizes.size } nonmutating set { sizes.size = newValue } }
+    private var tracking: Double { get { sizes.tracking } nonmutating set { sizes.tracking = newValue } }
+    private var leading: Double { get { sizes.leading } nonmutating set { sizes.leading = newValue } }
     @AppStorage("fontso.specimen.unit") private var unitRaw = SpecimenUnit.point.rawValue
-    @AppStorage("fontso.specimen.tracking") private var tracking = 0.0
-    @AppStorage("fontso.specimen.leading") private var leading = 1.2
     @ObservedObject private var theme = PaperSettings.shared
     @State private var editorHeights: [Int64: CGFloat] = [:]
     @State private var activeSourcePath = ""
@@ -265,8 +272,72 @@ struct SpecimenView: View {
     @State private var overlayColorFor: Int64?
     /// The pinned fonts large across the dock. Preview and Playground share the choice.
     @AppStorage("fontso.pinned.large.dock") private var dockPinnedLarge = false
+    @State private var listExportOpen = false
+    @State private var listExportWidth: CGFloat = 720
 
     private let previewLimit = 24
+
+    /// The mode on show: the window's own, or the tab of the main window. A mode that stands in a window of its
+    /// own has left the tabs of the main window, which shows Preview then.
+    private var shownTab: WorkspaceTab {
+        if let fixedTab { return fixedTab }
+        return store.isDetached(store.workspaceTab) ? .preview : store.workspaceTab
+    }
+
+    // MARK: What the stack shows
+
+    /// The Pinned tab and a list in a window of its own have a search and an order of their own. Preview in the
+    /// main window follows the navigation.
+    private var own: PreviewScope? {
+        if shownTab == .pinned { return store.scope(for: .pinned) }
+        if let fixedSource { return store.scope(for: fixedSource) }
+        return nil
+    }
+
+    private var viewFilter: LibraryFilter { own?.source ?? store.filter }
+    private var viewTitle: String { store.title(of: viewFilter) }
+    private var viewFaces: [FontFace] { own.map { store.previewFaces(in: $0) } ?? store.previewFaces }
+    private var viewHeadings: [Int64: String] { own.map { store.previewHeadings(in: $0) } ?? store.previewHeadings }
+    private var viewGroups: [BrowseGroup] { own.map { store.browseGroups(in: $0) } ?? store.browseGroups }
+    private var viewLinks: [OutsideFont] { store.listLinks(in: viewFilter, query: viewQuery) }
+    private var viewNarrows: Bool { store.activeFilterCount > 0 || !viewQuery.isEmpty }
+
+    private var viewIsList: Bool {
+        if case .group = viewFilter { return true }
+        return false
+    }
+
+    /// A list and the pinned fonts were picked by hand: every cut shows, in the order it was arranged in.
+    private var viewKeepsOrder: Bool { viewIsList || viewFilter == .pinned }
+
+    private var viewQuery: String {
+        get { own?.query ?? store.query }
+        nonmutating set {
+            if let own { own.query = newValue } else { store.query = newValue }
+        }
+    }
+
+    private var viewSort: LibrarySort {
+        get { own?.sort ?? store.sort }
+        nonmutating set {
+            if let own { own.sort = newValue } else { store.sort = newValue }
+        }
+    }
+
+    private var viewAscending: Bool {
+        get { own?.sortAscending ?? store.sortAscending }
+        nonmutating set {
+            if let own { own.sortAscending = newValue } else { store.sortAscending = newValue }
+        }
+    }
+
+    /// Fonts dropped on the stack: into the list on show, or pinned where there is none.
+    private func takeFonts(_ identities: [String]) -> Bool {
+        if viewIsList {
+            return store.addToList(of: viewFilter, identities: identities)
+        }
+        return store.addToPreview(identities)
+    }
 
     /// Feature switches moved away from the font's defaults. Kept in the store, so the switches in Info reach the preview.
     private var featureOverrides: [String: Bool] {
@@ -284,50 +355,56 @@ struct SpecimenView: View {
 
     @ViewBuilder
     private var workspaceBody: some View {
-        let source = store.previewFaces
+        let source = viewFaces
         let working = store.workingFaces
-        let faces = store.workspaceTab == .preview ? source : working
+        let faces = shownTab.stacks ? source : working
         VStack(spacing: 0) {
             previewColumnBar(faces)
-            if store.workspaceTab == .shape {
+            if shownTab == .shape {
                 ShapeView()
-            } else if store.workspaceTab == .playground {
+            } else if shownTab == .playground {
                 PlaygroundView()
                     .paperColors(ink: ink, paper: Color(nsColor: paper))
-            } else if store.workspaceTab == .compare {
+            } else if shownTab == .compare {
                 compareWorkspace(working)
                     .paperColors(ink: ink, paper: Color(nsColor: paper))
-            } else if faces.isEmpty, store.isViewingList,
-                      !store.previewListLinks.isEmpty || (store.outsideSelection.isEmpty && !store.narrowsView) {
+            } else if faces.isEmpty, viewIsList,
+                      !viewLinks.isEmpty || (store.outsideSelection.isEmpty && !viewNarrows) {
                 // A list without library fonts: only links to fonts outside the library, or nothing yet.
                 ColumnScroll {
                     VStack(alignment: .leading, spacing: 12) {
-                        if store.previewListLinks.isEmpty {
-                            Text("This list is empty. Drag fonts from the navigation or the preview onto the list to fill it.")
+                        if viewLinks.isEmpty {
+                            Text("This list is empty. Drag fonts here from the navigation or from another preview to fill it.")
                                 .font(AppChrome.type())
                                 .foregroundStyle(tone.half)
                                 .fixedSize(horizontal: false, vertical: true)
                                 .padding(.leading, 2)
                                 .padding(.bottom, 8)
-                        } else if store.narrowsView {
+                        } else if viewNarrows {
                             narrowedNotice
                         }
-                        listLinkStack(store.previewListLinks)
+                        listLinkStack(viewLinks)
                     }
                     .padding(.leading, 16)
                     .padding(.trailing, 9)
                     .padding(.vertical, 12)
                 }
                 .paperColors(ink: ink, paper: Color(nsColor: paper))
-            } else if faces.isEmpty, store.outsideSelection.isEmpty, store.narrowsView {
+            } else if faces.isEmpty, store.outsideSelection.isEmpty, viewNarrows {
                 narrowedEmpty
             } else if faces.isEmpty && store.outsideSelection.isEmpty {
                 ContentUnavailableView {
-                    Text(store.isViewingList ? "This list is empty" : "No fonts here")
+                    Text(viewIsList ? "This list is empty" : shownTab == .pinned ? "Nothing pinned yet" : "No fonts here")
                 } description: {
-                    Text(store.isViewingList
+                    Text(viewIsList
                         ? "Drag fonts from the navigation or the preview onto the list to fill it."
-                        : "Click a list or a library view in the navigation to stack its fonts here.")
+                        : shownTab == .pinned
+                            ? "Pin fonts in Preview with the pin, or drag them onto this tab. Compare, Shape, and Use work with them."
+                            : "Click a list or a library view in the navigation to stack its fonts here.")
+                }
+                .contentShape(Rectangle())
+                .dropDestination(for: FontDragItem.self) { items, _ in
+                    takeFonts(items.flatMap(\.identities))
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if faces.isEmpty && store.outsideSelection.count == 1, let item = store.outsideSelection.first {
@@ -349,12 +426,69 @@ struct SpecimenView: View {
             reconcilePreviewOrder(store.workingFaces.map(\.id))
         }
         .onAppear {
-            typedQuery = store.query
+            typedQuery = viewQuery
+        }
+        // Preview and Pinned each have a search of their own.
+        .onChange(of: shownTab) { _, _ in
+            typedQuery = viewQuery
         }
         .sheet(item: $editingOutside) { item in
             OutsideFontForm(editing: item) { name, source, url in
                 store.updateOutsideItem(item, name: name, source: source, url: url)
             }
+        }
+        .sheet(isPresented: $listExportOpen) {
+            let families = viewGroups.flatMap(\.families)
+            let entries = Array(families.prefix(ListExport.familyLimit))
+            ListExportSheet(
+                title: viewTitle,
+                families: entries.map(\.name),
+                totalFamilies: families.count,
+                screenWidth: max(320, listExportWidth)
+            ) { options in
+                listExportOpen = false
+                exportList(entries: entries.map { ListPage.Entry(family: $0.name, face: $0.representative) }, options: options)
+            }
+        }
+        .background(
+            GeometryReader { proxy in
+                Color.clear.preference(key: ListExportWidthKey.self, value: proxy.size.width)
+            }
+        )
+        .onPreferenceChange(ListExportWidthKey.self) { listExportWidth = $0 }
+    }
+
+    /// Writes the open navigation source as a specimen list, one family after another.
+    private func exportList(entries: [ListPage.Entry], options: PlaygroundExportOptions) {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [options.kind == .pdf ? .pdf : .png]
+        panel.canCreateDirectories = true
+        panel.nameFieldStringValue = ListPage.fileName(
+            title: viewTitle,
+            families: entries.map(\.family),
+            kind: options.kind
+        )
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let format = options.resolved(screenWidth: max(320, listExportWidth))
+        let layout = ListPage.layout(
+            entries: entries,
+            sample: specimenText,
+            size: specimenSize,
+            tracking: tracking,
+            leading: leading,
+            format: format,
+            paper: paper,
+            ink: theme.ink
+        )
+        do {
+            let written = try PlaygroundPage.write(layout, to: url, kind: options.kind)
+            if written.count == 1 {
+                store.statusText = "Exported the list."
+            } else {
+                store.statusText = "Exported \(written.count) pages as separate PNG files next to \(url.lastPathComponent)."
+            }
+        } catch {
+            store.alertMessage = error.localizedDescription
         }
     }
 
@@ -384,7 +518,9 @@ struct SpecimenView: View {
     /// The view has fonts, but the search or a filter holds all of them back. The way out is one click.
     private var narrowedEmpty: some View {
         let names = store.activeFilterNames
-        let searching = !store.query.isEmpty
+        let searching = !viewQuery.isEmpty
+        // The search covers the open view. A font that lies elsewhere in the library is one click away.
+        let elsewhere = own == nil && searching && viewFilter != .all ? store.libraryMatchCount : 0
         return ContentUnavailableView {
             Text(names.isEmpty ? "No font matches the search" : "The filter hides every font here")
         } description: {
@@ -393,11 +529,21 @@ struct SpecimenView: View {
                     Text("Filter on: \(names.joined(separator: ", ")).")
                 }
                 if searching {
-                    Text("Search: “\(store.query)”.")
+                    Text("Search: “\(viewQuery)”.")
+                    if elsewhere > 0 {
+                        Text("\(AppChrome.count(elsewhere)) \(elsewhere == 1 ? "font matches" : "fonts match") in All fonts. The search looks through \(viewTitle) only.")
+                    }
                 }
             }
         } actions: {
             HStack(spacing: 8) {
+                if elsewhere > 0 {
+                    Button("Search all fonts") {
+                        store.searchWholeLibrary()
+                    }
+                    .buttonStyle(.chip(on: true))
+                    .help("Open All fonts and keep the search")
+                }
                 if !names.isEmpty {
                     Button {
                         store.clearFilters()
@@ -405,12 +551,12 @@ struct SpecimenView: View {
                         Label("Reset filter", systemImage: "arrow.counterclockwise")
                     }
                     .buttonStyle(.chip())
-                    .help("Switch every filter off and show all fonts of \(store.filterTitle)")
+                    .help("Switch every filter off and show all fonts of \(viewTitle)")
                 }
                 if searching {
                     Button {
                         typedQuery = ""
-                        store.query = ""
+                        viewQuery = ""
                     } label: {
                         Label("Clear search", systemImage: "xmark")
                     }
@@ -418,19 +564,20 @@ struct SpecimenView: View {
                     .help("Empty the search field")
                 }
             }
+            .fixedSize()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private var overlayOpen: Bool { store.workspaceTab == .compare && store.compareMode == .overlay }
-    private var alignOpen: Bool { store.workspaceTab == .compare && store.compareMode == .align }
+    private var overlayOpen: Bool { shownTab == .compare && store.compareMode == .overlay }
+    private var alignOpen: Bool { shownTab == .compare && store.compareMode == .align }
 
     /// Workspace tabs, then search, sort, and filter.
     private func previewColumnBar(_ faces: [FontFace]) -> some View {
         VStack(spacing: 0) {
             workspaceTabs(faces)
-            // Search, sort, and filter belong to Preview, where they arrange the list on show.
-            if store.workspaceTab == .preview {
+            // Search, sort, and filter belong to Preview and Pinned, where they arrange the fonts on show.
+            if shownTab.stacks {
                 HStack(spacing: 8) {
                     searchField
                     sortMenu
@@ -567,48 +714,83 @@ struct SpecimenView: View {
         alignSnap = snap
     }
 
-    /// The four tabs of the sketch: labels at the left of equal cells, hairlines between them, and a line under
-    /// every tab except the open one, so the open tab runs into the content below.
+    /// The tabs of the sketch: labels at the left of equal cells, hairlines between them, and a line under every
+    /// tab except the open one, so the open tab runs into the content below. A mode that stands in a window of its
+    /// own has no tab here; Preview always has.
     private func workspaceTabs(_ faces: [FontFace]) -> some View {
         HStack(spacing: 0) {
-            ForEach(WorkspaceTab.allCases) { tab in
-                WorkspaceTabCell(title: tab.title, active: store.workspaceTab == tab, onFonts: { identities in
-                    dropOnTab(tab, identities: identities)
-                }) {
-                    store.workspaceTab = tab
+            if let fixedTab {
+                // A window of its own shows one mode: its name stands where the tabs are, after the list it shows.
+                WorkspaceTabCell(
+                    title: fixedTab.title,
+                    lead: fixedTab == .preview ? viewTitle : nil,
+                    active: true,
+                    onFonts: { identities in dropOnTab(fixedTab, identities: identities) }
+                ) {}
+                .help(fixedTab == .preview
+                    ? "\(viewTitle), in a window of its own. Drop a font here to \(viewIsList ? "add it to the list" : "pin it")."
+                    : "\(fixedTab.help). Drop a font here to use it in \(fixedTab.title).")
+            } else {
+                ForEach(WorkspaceTab.allCases.filter { !store.isDetached($0) }) { tab in
+                    WorkspaceTabCell(title: tab.title, active: shownTab == tab, onFonts: { identities in
+                        dropOnTab(tab, identities: identities)
+                    }) {
+                        store.workspaceTab = tab
+                    }
+                    .help("\(tab.help). Drop a font here to \(tab == .playground ? "set it as a block" : "pin it").")
+                    .contextMenu {
+                        Button(tab == .preview ? "Open \(store.filterTitle) in its own window" : "Open \(tab.title) in its own window") {
+                            store.detach(tab)
+                        }
+                    }
                 }
-                .help("\(tab.help). Drop a font here to use it in \(tab.title).")
             }
-            HStack(spacing: 8) {
-                if store.workspaceTab == .playground {
-                    Button("Export") {
+            HStack(spacing: 6) {
+                if fixedTab == nil {
+                    IconChip(
+                        symbol: "macwindow.on.rectangle",
+                        tall: true,
+                        help: shownTab == .preview
+                            ? "Open \(viewTitle) in a window of its own. It stays there while this window goes on to other lists."
+                            : "Open \(shownTab.title) in a window of its own. It leaves the tabs here until that window is closed."
+                    ) {
+                        store.detach(shownTab)
+                    }
+                }
+                if shownTab == .playground {
+                    IconChip(symbol: "square.and.arrow.up", tall: true, help: "Export Use as PDF or PNG: screen, A4, A3, or a custom page") {
                         NotificationCenter.default.post(name: .fontsoPlaygroundExport, object: nil)
                     }
-                    .buttonStyle(.chip())
-                    .help("Export the playground as PDF or PNG: screen, A4, A3, or a custom page")
+                } else if shownTab.stacks {
+                    IconChip(symbol: "square.and.arrow.up", tall: true, help: "Export \(viewTitle) as PDF or PNG: screen, A4, A3, or a custom page") {
+                        listExportOpen = true
+                    }
+                    .disabled(viewFaces.isEmpty)
                 }
                 colorButton
             }
             .padding(.horizontal, 12)
-            // A fixed field for the buttons, so the four tabs keep the same width in every mode.
-            .frame(width: 148, height: 27, alignment: .trailing)
+            // A fixed field for the buttons, so the tabs keep the same width in every mode.
+            .frame(width: 104, height: 27, alignment: .trailing)
             .overlay(alignment: .bottom) {
                 Rectangle().fill(tone.hairline).frame(height: 0.5)
             }
         }
     }
 
-    /// A font dragged from the navigation onto a tab: pinned for Preview, Compare, and Shape, set as a new block in
-    /// Playground. The tab opens, so the font is seen where it landed.
+    /// A font dragged onto a tab: pinned for Preview, Pinned, Compare, and Shape, set as a new block in Use. A
+    /// list in a window of its own takes it into the list. The tab opens, so the font is seen where it landed.
     private func dropOnTab(_ tab: WorkspaceTab, identities: [String]) -> Bool {
         let valid = identities.filter { store.hasFace(identity: $0) }
         guard !valid.isEmpty else { return false }
         if tab == .playground {
             store.addToPlayground(valid)
+        } else if tab == .preview, fixedTab != nil {
+            return takeFonts(valid)
         } else {
             store.addToPreview(valid)
         }
-        if tab != .preview {
+        if !tab.stacks, fixedTab == nil {
             store.workspaceTab = tab
         }
         return true
@@ -620,25 +802,25 @@ struct SpecimenView: View {
                 .textFieldStyle(.plain)
                 .font(AppChrome.type())
                 .foregroundStyle(tone.ink)
-                .onSubmit { store.query = typedQuery }
+                .onSubmit { viewQuery = typedQuery }
                 .task(id: typedQuery) {
-                    guard typedQuery != store.query else { return }
+                    guard typedQuery != viewQuery else { return }
                     if typedQuery.isEmpty {
-                        store.query = ""
+                        viewQuery = ""
                         return
                     }
                     try? await Task.sleep(nanoseconds: 450_000_000)
-                    if !Task.isCancelled, typedQuery != store.query {
-                        store.query = typedQuery
+                    if !Task.isCancelled, typedQuery != viewQuery {
+                        viewQuery = typedQuery
                     }
                 }
-                .onChange(of: store.query) { _, query in
+                .onChange(of: viewQuery) { _, query in
                     if query != typedQuery { typedQuery = query }
                 }
             if !typedQuery.isEmpty {
                 Button("Clear") {
                     typedQuery = ""
-                    store.query = ""
+                    viewQuery = ""
                 }
                 .buttonStyle(.chip())
                 .help("Clear the search")
@@ -655,7 +837,7 @@ struct SpecimenView: View {
 
     private var sortMenu: some View {
         Menu {
-            if store.isViewingList {
+            if viewKeepsOrder {
                 Section("Order") {
                     sortChoice(.custom)
                     ForEach(LibrarySort.orderSection) { sortChoice($0) }
@@ -674,12 +856,12 @@ struct SpecimenView: View {
             Section("Direction") {
                 ForEach([true, false], id: \.self) { ascending in
                     Button {
-                        store.sortAscending = ascending
+                        viewAscending = ascending
                     } label: {
-                        if store.sortAscending == ascending {
-                            Label(store.sort.directionTitle(ascending: ascending), systemImage: "checkmark")
+                        if viewAscending == ascending {
+                            Label(viewSort.directionTitle(ascending: ascending), systemImage: "checkmark")
                         } else {
-                            Text(store.sort.directionTitle(ascending: ascending))
+                            Text(viewSort.directionTitle(ascending: ascending))
                         }
                     }
                 }
@@ -688,14 +870,14 @@ struct SpecimenView: View {
             Text("Sort")
         }
         .chromeMenuChip()
-        .help(store.sort.hint)
+        .help(viewSort.hint)
     }
 
     private func sortChoice(_ item: LibrarySort) -> some View {
         Button {
-            store.sort = item
+            viewSort = item
         } label: {
-            if store.sort == item {
+            if viewSort == item {
                 Label(item.title, systemImage: "checkmark")
             } else {
                 Text(item.title)
@@ -730,7 +912,7 @@ struct SpecimenView: View {
     private func specimen(_ faces: [FontFace]) -> some View {
         ZStack(alignment: .bottom) {
             Group {
-                if store.workspaceTab == .preview {
+                if shownTab.stacks {
                     ScrollViewReader { scroll in
                         ScrollView {
                             previewStack(faces)
@@ -753,7 +935,7 @@ struct SpecimenView: View {
                         }
                         // A font from the news clicked in the navigation: its card stands under the library fonts.
                         .onChange(of: store.outsideSelection.first?.nameKey, initial: true) { _, id in
-                            guard let id, store.previewListLinks.contains(where: { $0.nameKey == id }) else { return }
+                            guard let id, viewLinks.contains(where: { $0.nameKey == id }) else { return }
                             // First to the block of news fonts, which the lazy stack knows; then to the card itself.
                             DispatchQueue.main.async {
                                 scroll.scrollTo("list-links", anchor: .top)
@@ -765,7 +947,7 @@ struct SpecimenView: View {
                     }
                 } else {
                     ColumnScroll(
-                        resetID: "\(store.filterTitle)-\(faces.map { String($0.id) }.joined(separator: ","))",
+                        resetID: "\(viewTitle)-\(faces.map { String($0.id) }.joined(separator: ","))",
                         bottomInset: inspectorHeight + 28
                     ) {
                         previewStack(faces)
@@ -778,8 +960,8 @@ struct SpecimenView: View {
                     previewInspector(faces)
                 } else {
                     DockPill(
-                        title: store.workspaceTab == .preview ? "Text · Adjust · Pinned" : "Text · Adjust",
-                        help: store.workspaceTab == .preview ? "Show sample text, size, and pinned fonts" : "Show sample text and size"
+                        title: shownTab == .preview ? "Text · Adjust · Pinned" : "Text · Adjust",
+                        help: shownTab == .preview ? "Show sample text, size, and pinned fonts" : "Show sample text and size"
                     ) {
                         inspectorOpen = true
                     }
@@ -798,10 +980,10 @@ struct SpecimenView: View {
         let face = faces[0]
         let sampleFace = store.selection.first.flatMap { store.face(id: $0) } ?? face
         return ChromeDock(
-            hideHelp: store.workspaceTab == .preview ? "Hide Text, Adjust, and Pinned" : "Hide Text and Adjust",
+            hideHelp: shownTab == .preview ? "Hide Text, Adjust, and Pinned" : "Hide Text and Adjust",
             onHide: { inspectorOpen = false },
             // Large, the pinned fonts lie across the dock; small, they are one of its sections.
-            above: store.workspaceTab == .preview && dockPinnedLarge ? AnyView(DockPinnedBoard(large: $dockPinnedLarge)) : nil
+            above: shownTab == .preview && dockPinnedLarge ? AnyView(DockPinnedBoard(large: $dockPinnedLarge)) : nil
         ) {
             DockSection("Text", key: "text") {
                 SampleChips(text: $specimenText, face: sampleFace)
@@ -815,6 +997,7 @@ struct SpecimenView: View {
                     .help("The sample text of every font in the preview")
             }
             DockSection("Adjust", key: "adjust") {
+                SizeLinkChip()
                 ChromeSegments(
                     items: SpecimenUnit.allCases.map { .init(title: $0.title, value: $0.rawValue, help: "Size and line height in \($0.title)") },
                     selection: $unitRaw,
@@ -825,7 +1008,7 @@ struct SpecimenView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             // Compare shows the pinned fonts in the row at the top.
-            if store.workspaceTab == .preview, !dockPinnedLarge {
+            if shownTab == .preview, !dockPinnedLarge {
                 DockSection("Pinned", key: "pinned", detail: "\(store.pinnedFaces.count)", onFonts: { store.addToPreview($0) }) {
                     PinnedSizeChip(large: $dockPinnedLarge)
                     PinnedMenu()
@@ -1001,7 +1184,7 @@ struct SpecimenView: View {
     /// A library view with several families starts each one folded to a single sample. A family alone in the
     /// preview starts open, and so do your own lists, where every cut was picked by hand.
     private func opensFamilies(_ groups: [FamilyCluster]) -> Bool {
-        groups.count == 1 || store.isViewingList
+        groups.count == 1 || viewKeepsOrder
     }
 
     private func isOpen(_ cluster: FamilyCluster, alone: Bool) -> Bool {
@@ -1043,7 +1226,7 @@ struct SpecimenView: View {
     }
 
     private func previewStack(_ faces: [FontFace]) -> some View {
-        let shown = store.workspaceTab == .preview ? faces : Array(faces.prefix(previewLimit))
+        let shown = shownTab.stacks ? faces : Array(faces.prefix(previewLimit))
         return VStack(alignment: .leading, spacing: 0) {
             Group {
                 if overlayOpen && shown.count > 1 {
@@ -1052,10 +1235,10 @@ struct SpecimenView: View {
                 } else if alignOpen && shown.count > 1 {
                     alignBoard(shown)
                         .padding(12)
-                } else if store.workspaceTab == .preview {
+                } else if shownTab.stacks {
                     let groups = clusters(shown)
-                    let headings = store.previewHeadings
-                    let links = store.previewListLinks
+                    let headings = viewHeadings
+                    let links = viewLinks
                     LazyVStack(alignment: .leading, spacing: 8) {
                         ForEach(Array(groups.enumerated()), id: \.element.id) { index, cluster in
                             // The name of the sort group: a category, a foundry, a format.
@@ -1066,7 +1249,7 @@ struct SpecimenView: View {
                             clusterCard(cluster, alone: opensFamilies(groups), first: index == 0, count: faces.count)
                                 .id(cluster.id)
                         }
-                        if !links.isEmpty || store.isViewingList {
+                        if !links.isEmpty || viewIsList {
                             listLinkStack(links)
                                 .padding(.top, 8)
                                 .id("list-links")
@@ -1090,7 +1273,7 @@ struct SpecimenView: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .topLeading)
-            if store.workspaceTab != .preview, faces.count > shown.count {
+            if !shownTab.stacks, faces.count > shown.count {
                 Text("Showing \(shown.count) of \(faces.count) pinned fonts.")
                     .font(.uiCaption)
                     .foregroundStyle(ink.opacity(0.72))
@@ -1103,7 +1286,7 @@ struct SpecimenView: View {
             }
         }
         .dropDestination(for: FontDragItem.self) { items, _ in
-            store.addToPreview(items.flatMap(\.identities))
+            takeFonts(items.flatMap(\.identities))
         }
     }
 
@@ -1117,7 +1300,9 @@ struct SpecimenView: View {
 
     /// Outside fonts on show that are not saved in the open list; those have their own cards under the list's fonts.
     private var looseOutside: [OutsideFont] {
-        let saved = Set(store.previewListLinks.map(\.nameKey))
+        // They belong to what the navigation shows, not to Pinned or to a list in a window of its own.
+        guard own == nil else { return [] }
+        let saved = Set(viewLinks.map(\.nameKey))
         return store.outsideSelection.filter { !saved.contains($0.nameKey) }
     }
 
@@ -1127,7 +1312,7 @@ struct SpecimenView: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 stackHeading(links.isEmpty ? "Not in library" : "Not in library · \(links.count)")
-                if case .group(let list) = store.filter {
+                if case .group(let list) = viewFilter {
                     IconChip(symbol: "plus", help: "Add a font that is not in the library: its name and the link to its page") {
                         addingLink = true
                     }
@@ -1185,7 +1370,7 @@ struct SpecimenView: View {
                     Button("Edit…") { editingOutside = item }
                         .buttonStyle(.chip())
                         .help("Change the name, source, or link")
-                    if case .group(let list) = store.filter {
+                    if case .group(let list) = viewFilter {
                         IconChip(symbol: "xmark", help: "Remove \(item.name) from this list") {
                             store.removeListLink(list, item: item)
                         }
@@ -1551,26 +1736,21 @@ struct SpecimenView: View {
 
     /// Paper and text colour for every preview mode and the Playground, from the column bar.
     private var colorButton: some View {
-        Button {
+        IconChip(symbol: "circle.lefthalf.filled", on: colorsOpen, tall: true, help: "Colors: paper and text colour of the preview") {
             colorsOpen.toggle()
         } label: {
-            HStack(spacing: 5) {
-                ZStack {
-                    Circle()
-                        .fill(Color(nsColor: paper))
-                    Circle()
-                        .trim(from: 0, to: 0.5)
-                        .fill(ink)
-                        .rotationEffect(.degrees(45))
-                    Circle()
-                        .stroke(Color.primary.opacity(0.35), lineWidth: 0.5)
-                }
-                .frame(width: 9, height: 9)
-                Text("Colors")
+            ZStack {
+                Circle()
+                    .fill(Color(nsColor: paper))
+                Circle()
+                    .trim(from: 0, to: 0.5)
+                    .fill(ink)
+                    .rotationEffect(.degrees(45))
+                Circle()
+                    .stroke((colorsOpen ? Color(nsColor: paper) : ink).opacity(0.5), lineWidth: 0.5)
             }
+            .frame(width: 9, height: 9)
         }
-        .buttonStyle(.chip(on: colorsOpen))
-        .help("Paper and text colours")
         .popover(isPresented: $colorsOpen, arrowEdge: .bottom) {
             VStack(alignment: .leading, spacing: 10) {
                 Text("Colors")
@@ -1579,14 +1759,17 @@ struct SpecimenView: View {
                 colorSwatches
                 HStack(spacing: 10) {
                     ColorPicker("Background", selection: backgroundColor, supportsOpacity: false)
+                        .fixedSize()
                     ColorPicker("Text", selection: foregroundColor, supportsOpacity: false)
+                        .fixedSize()
                     Spacer(minLength: 0)
                     colorReset
                 }
             }
             .controlSize(.small)
             .padding(12)
-            .frame(width: 300)
+            .frame(width: 340)
+            .modifier(ChromeSheet())
         }
     }
 
@@ -1610,12 +1793,12 @@ struct SpecimenView: View {
     }
 
     private func reorderPreview(moving identities: [String], before face: FontFace) {
-        let ids = Set(store.previewFaces.map(\.id))
+        let ids = Set(viewFaces.map(\.id))
         let movingIDs = identities.compactMap { identity in
             store.face(identity: identity).map(\.id).flatMap { ids.contains($0) ? $0 : nil }
         }
         guard !movingIDs.isEmpty, !movingIDs.contains(face.id) else { return }
-        var order = previewOrder.isEmpty ? store.previewFaces.map(\.id) : previewOrder
+        var order = previewOrder.isEmpty ? viewFaces.map(\.id) : previewOrder
         order.removeAll { movingIDs.contains($0) }
         let index = order.firstIndex(of: face.id) ?? order.endIndex
         order.insert(contentsOf: movingIDs, at: index)
@@ -1632,7 +1815,7 @@ struct SpecimenView: View {
         open: Bool = true,
         leads: Bool = true
     ) -> some View {
-        let height = editorHeights[face.id] ?? 120
+        let height = max(editorHeights[face.id] ?? 120, 44)
         let family = cluster?.faces ?? [face]
         let folded = family.count > 1 && !open
         let selected = store.selection.contains(face.id)
@@ -1678,13 +1861,13 @@ struct SpecimenView: View {
                 if let note = store.licenseNote(for: folded ? family : [face]) {
                     LicenseTag(note: note) {
                         // The tag leads to the license itself.
-                        store.selectInPreview(face, scroll: false)
+                        store.selectInPreview(face, scroll: false, showInfo: true)
                         licenseOpen = true
                     }
                 }
                 Spacer(minLength: 8)
                 Button("Info") {
-                    store.selectInPreview(face, scroll: false)
+                    store.selectInPreview(face, scroll: false, showInfo: true)
                 }
                 .buttonStyle(.chip(on: selected))
                 .help(selected ? "Selected: its Info shows under the navigation" : "Select this cut and show its Info under the navigation")
@@ -1705,9 +1888,9 @@ struct SpecimenView: View {
             .draggable(FontDragItem(identities: [face.identity]))
             .dropDestination(for: FontDragItem.self) { items, _ in
                 let identities = items.flatMap(\.identities)
-                let shown = Set(store.previewFaces.map(\.identity))
+                let shown = Set(viewFaces.map(\.identity))
                 guard identities.contains(where: { shown.contains($0) }) else {
-                    return store.addToPreview(identities)
+                    return takeFonts(identities)
                 }
                 reorderPreview(moving: identities, before: face)
                 return true
@@ -1726,7 +1909,7 @@ struct SpecimenView: View {
                     measuredHeight: heightBinding(face.id),
                     onFocus: { store.selectInPreview(face, scroll: false) }
                 )
-                .frame(maxWidth: .infinity, minHeight: max(height, specimenSize * max(leading, 1.2) + 48), alignment: .topLeading)
+                .frame(maxWidth: .infinity, minHeight: height, alignment: .topLeading)
                 if placeholder && specimenText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     Text("Type here")
                         .foregroundStyle(ink.opacity(0.4))
@@ -1739,7 +1922,9 @@ struct SpecimenView: View {
             .padding(.bottom, 6)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(nsColor: ground))
+        // A plain rectangle: a colour alone as the background comes out with rounded corners on recent macOS,
+        // which does not go with the straight lines between the cuts of an open family.
+        .background { Rectangle().fill(Color(nsColor: ground)) }
     }
 
     private func foldedLabel(_ face: FontFace, styles: Int) -> String {
@@ -1749,7 +1934,7 @@ struct SpecimenView: View {
 
     /// Sends this font to the Playground as a new block, set in the current sample text.
     private func playgroundButton(_ face: FontFace) -> some View {
-        IconChip(symbol: "plus.rectangle.on.rectangle", help: "To Playground: add this font as a new text block") {
+        IconChip(symbol: "plus.rectangle.on.rectangle", help: "To Use: add this font as a new text block") {
             store.addToPlayground([face.identity])
         }
     }
@@ -1760,7 +1945,7 @@ struct SpecimenView: View {
         return IconChip(
             symbol: pinned ? "pin.fill" : "pin",
             on: pinned,
-            help: pinned ? "Pinned for Compare, Shape, and Playground. Click to unpin." : "Pin this font for Compare, Shape, and Playground"
+            help: pinned ? "Pinned for Compare, Shape, and Use. Click to unpin." : "Pin this font for Compare, Shape, and Use"
         ) {
             store.togglePin(face)
         }
@@ -1771,7 +1956,7 @@ struct SpecimenView: View {
         return IconChip(
             symbol: pinned ? "pin.fill" : "pin",
             on: pinned,
-            help: pinned ? "Every style of this family is pinned. Click to unpin them." : "Pin all \(faces.count) styles for Compare, Shape, and Playground"
+            help: pinned ? "Every style of this family is pinned. Click to unpin them." : "Pin all \(faces.count) styles for Compare, Shape, and Use"
         ) {
             if pinned {
                 let identities = Set(faces.map(\.identity))
@@ -1968,7 +2153,8 @@ struct SpecimenView: View {
 
     private func heightBinding(_ id: Int64) -> Binding<CGFloat> {
         Binding(
-            get: { editorHeights[id] ?? 180 },
+            // The same start as the card's own, so a sample that happens to measure this is not held for unreported.
+            get: { editorHeights[id] ?? 120 },
             set: { editorHeights[id] = $0 }
         )
     }
@@ -1976,7 +2162,7 @@ struct SpecimenView: View {
     private var adjustControls: some View {
         VStack(alignment: .leading, spacing: 3) {
             DockSliderRow(title: "Size", value: displaySize, range: sliderRange, step: sliderStep, fraction: unit == .rem ? 2 : 1, reset: { specimenSize = 48 })
-            DockSliderRow(title: "Spacing", value: $tracking, range: -0.08...0.4, step: 0.01, fraction: 2, reset: { tracking = 0 })
+            DockSliderRow(title: "Spacing", value: Bindable(sizes).tracking, range: -0.08...0.4, step: 0.01, fraction: 2, reset: { tracking = 0 })
             DockSliderRow(title: "Height", value: displayLeading, range: leadingRange, step: sliderStep, fraction: unit == .rem ? 2 : 1, reset: { leading = 1.2 })
         }
     }
@@ -2679,20 +2865,33 @@ private final class NoteTextView: NSTextView {
     }
 }
 
-private final class SpecimenTextView: NSTextView {
-    /// TextKit 1, so glyphs may sit above a tight line box instead of being clipped there.
-    /// TextKit 2 (the default on recent macOS) crops the first line to `maximumLineHeight`.
+/// A text view whose first line always has room for its ink, however tight the line height and however tall the
+/// font's own metrics. Preview, Shape, Mix, and Use set their samples in it.
+///
+/// TextKit 1, since TextKit 2 crops the first line to `maximumLineHeight`. TextKit 1 draws nothing above the first
+/// line fragment either, so that fragment is made as tall as the ink of its line: see `SpecimenLines`.
+class InkTextView: NSTextView {
+    let lines = SpecimenLines()
+
     init() {
         let storage = NSTextStorage()
         let layout = NSLayoutManager()
         layout.usesFontLeading = false
+        layout.delegate = lines
         storage.addLayoutManager(layout)
         let container = NSTextContainer(size: NSSize(width: 100, height: CGFloat.greatestFiniteMagnitude))
         container.widthTracksTextView = true
         container.heightTracksTextView = false
+        // The side margin lies inside the text container, so a swash that reaches left of its letter is drawn.
+        container.lineFragmentPadding = InkTextView.sidePadding
         layout.addTextContainer(container)
         super.init(frame: .zero, textContainer: container)
         clipsToBounds = false
+        // SwiftUI gives the view its height, from `fittedHeight`.
+        isVerticallyResizable = false
+        isHorizontallyResizable = false
+        autoresizingMask = [.width]
+        textContainerInset = InkTextView.inset
         unregisterDraggedTypes()
     }
 
@@ -2701,6 +2900,9 @@ private final class SpecimenTextView: NSTextView {
         fatalError("init(coder:) is unused")
     }
 
+    static let sidePadding: CGFloat = 14
+    static let inset = NSSize(width: 5, height: 14)
+
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         clipsToBounds = false
@@ -2708,12 +2910,85 @@ private final class SpecimenTextView: NSTextView {
         superview?.clipsToBounds = false
     }
 
-    /// Drops pass through to the preview, so a font dragged onto the sample text joins the preview.
-    override var acceptableDragTypes: [NSPasteboard.PasteboardType] { [] }
-
     override func scrollWheel(with event: NSEvent) {
         ScrollWheelForwarding.pass(event, from: self)
     }
+
+    /// Called when the width changed, so the lines break anew and the height is measured again.
+    var onWidthChange: (() -> Void)?
+
+    override func setFrameSize(_ newSize: NSSize) {
+        let before = frame.width
+        super.setFrameSize(newSize)
+        if abs(before - newSize.width) > 0.5 { onWidthChange?() }
+    }
+
+    /// Sets the room the ink of these fonts needs around the text, and lays the text out again when it changed.
+    func fit(fonts: [NSFont]) {
+        var top: CGFloat = 0
+        var bottom: CGFloat = 0
+        for font in fonts {
+            let reach = SpecimenInk.reach(font: font, text: string)
+            top = max(top, reach.top)
+            bottom = max(bottom, reach.bottom)
+        }
+        guard abs(lines.top - top) > 0.25 || abs(lines.bottom - bottom) > 0.25 else { return }
+        lines.top = top
+        lines.bottom = bottom
+        if let storage = textStorage, let layoutManager {
+            layoutManager.invalidateLayout(forCharacterRange: NSRange(location: 0, length: storage.length), actualCharacterRange: nil)
+        }
+    }
+
+    /// The height that shows the whole text: from the top margin to the ink under the last line, plus the margin.
+    func fittedHeight() -> CGFloat? {
+        guard let layoutManager, let textContainer else { return nil }
+        layoutManager.ensureLayout(for: textContainer)
+        var height = layoutManager.usedRect(for: textContainer).height
+        let glyphs = layoutManager.numberOfGlyphs
+        // The last line keeps the font's whole descent under its baseline. The ink seldom goes that far, and now
+        // and then further.
+        if glyphs > 0, layoutManager.extraLineFragmentTextContainer == nil {
+            var range = NSRange()
+            let rect = layoutManager.lineFragmentRect(forGlyphAt: glyphs - 1, effectiveRange: &range)
+            let baseline = layoutManager.location(forGlyphAt: range.location).y
+            height += lines.bottom - (rect.height - baseline)
+        }
+        return max(height + textContainerInset.height * 2, 44)
+    }
+}
+
+/// Places the first line of a sample. With a fixed line height TextKit sets the baseline by the font's descent, so
+/// a tight line height or a font with a tall ascent pushes the first line out of its fragment at the top, where
+/// it is not drawn; a loose one leaves a wide gap above. Here the first fragment reaches from the top of the ink
+/// to the usual distance under the baseline, so the first line starts at the same place in every card.
+final class SpecimenLines: NSObject, NSLayoutManagerDelegate {
+    /// How far the ink reaches above the baseline.
+    var top: CGFloat = 0
+    /// How far it reaches below.
+    var bottom: CGFloat = 0
+
+    func layoutManager(
+        _ layoutManager: NSLayoutManager,
+        shouldSetLineFragmentRect lineFragmentRect: UnsafeMutablePointer<NSRect>,
+        lineFragmentUsedRect: UnsafeMutablePointer<NSRect>,
+        baselineOffset: UnsafeMutablePointer<CGFloat>,
+        in textContainer: NSTextContainer,
+        forGlyphRange glyphRange: NSRange
+    ) -> Bool {
+        guard glyphRange.location == 0, top > 0 else { return false }
+        let shift = top - baselineOffset.pointee
+        guard abs(shift) > 0.01, lineFragmentRect.pointee.height + shift > 1 else { return false }
+        lineFragmentRect.pointee.size.height += shift
+        lineFragmentUsedRect.pointee.size.height += shift
+        baselineOffset.pointee = top
+        return true
+    }
+}
+
+private final class SpecimenTextView: InkTextView {
+    /// Drops pass through to the preview, so a font dragged onto the sample text joins the preview.
+    override var acceptableDragTypes: [NSPasteboard.PasteboardType] { [] }
 
     var onFocus: (() -> Void)?
 
@@ -2741,26 +3016,35 @@ private struct SpecimenSwatch: Identifiable {
 }
 
 enum SpecimenInk {
-    static func overflow(font: NSFont, text: String) -> (top: CGFloat, bottom: CGFloat) {
-        let fallback = max(8, font.pointSize * 0.25)
-        let flat = String(text.prefix(160)).replacingOccurrences(of: "\n", with: " ")
-        let sample = flat.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Hg" : flat
-        let line = CTLineCreateWithAttributedString(NSAttributedString(string: sample, attributes: [.font: font]))
-        var ascent: CGFloat = 0
-        var descent: CGFloat = 0
-        var leading: CGFloat = 0
-        CTLineGetTypographicBounds(line, &ascent, &descent, &leading)
-        let bounds = CTLineGetImageBounds(line, nil)
-        var inkTop = max(ascent, font.ascender)
-        var inkBottom = max(descent, abs(font.descender))
-        if bounds.width.isFinite, bounds.height.isFinite, bounds.height > 0, bounds.height < font.pointSize * 6 {
-            // Image bounds sit on the baseline with +Y up. A flipped or empty rect is ignored above.
-            inkTop = max(inkTop, bounds.maxY)
-            inkBottom = max(inkBottom, -bounds.minY)
+    /// How far the ink of the text reaches above the baseline of its first line and below that of its last, in
+    /// this font, measured on the letters themselves. A font's own ascent and descent can be far larger than
+    /// anything it draws, or smaller. Never less than the capitals above and a short descender below, so every
+    /// card starts and ends alike.
+    static func reach(font: NSFont, text: String) -> (top: CGFloat, bottom: CGFloat) {
+        let size = font.pointSize
+        let paragraphs = text.split(whereSeparator: \.isNewline)
+            .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+        let first = paragraphs.first.map { String($0.prefix(240)) } ?? "Hg"
+        let last = paragraphs.last.map { String($0.suffix(240)) } ?? first
+        let capitals = font.capHeight > 0 ? font.capHeight : size * 0.7
+        var top = font.ascender > 0 ? min(capitals, font.ascender) : capitals
+        var bottom = min(abs(font.descender), size * 0.25)
+        if let bounds = ink(first, font: font) {
+            top = max(top, bounds.maxY)
         }
-        let top = max(0, inkTop - font.ascender)
-        let bottom = max(0, inkBottom - abs(font.descender))
-        return (max(top, 4), max(bottom, 4, fallback * 0.15))
+        if let bounds = first == last ? ink(first, font: font) : ink(last, font: font) {
+            bottom = max(bottom, -bounds.minY)
+        }
+        // A little air for the smoothing of the edges.
+        return (min(top, size * 4) + 2, min(bottom, size * 3) + 2)
+    }
+
+    /// The box around the ink of one line, on the baseline with +Y up. Nil for a line that draws nothing.
+    private static func ink(_ text: String, font: NSFont) -> CGRect? {
+        let line = CTLineCreateWithAttributedString(NSAttributedString(string: text, attributes: [.font: font]))
+        let bounds = CTLineGetImageBounds(line, nil)
+        guard bounds.width.isFinite, bounds.height.isFinite, bounds.height > 0, bounds.height < font.pointSize * 6 else { return nil }
+        return bounds
     }
 }
 
@@ -2887,17 +3171,15 @@ struct SpecimenEditor: NSViewRepresentable {
         textView.isRichText = true
         textView.importsGraphics = false
         textView.drawsBackground = true
-        textView.isVerticallyResizable = true
-        textView.isHorizontallyResizable = false
-        textView.autoresizingMask = [.width]
-        textView.textContainerInset = NSSize(width: 14, height: 16)
-        textView.textContainer?.widthTracksTextView = true
-        textView.textContainer?.heightTracksTextView = false
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
         textView.isAutomaticTextReplacementEnabled = false
         textView.delegate = context.coordinator
         textView.string = text
+        textView.onWidthChange = { [weak textView, weak coordinator = context.coordinator] in
+            guard let textView else { return }
+            coordinator?.report(textView)
+        }
         return textView
     }
 
@@ -2917,19 +3199,8 @@ struct SpecimenEditor: NSViewRepresentable {
             variations: variations,
             features: features
         ) else { return }
-        let overflow = SpecimenInk.overflow(font: font, text: textView.string)
-        let natural = font.ascender + abs(font.descender) + max(font.leading, 0)
-        let desired = CGFloat(pointSize * leading)
-        // Room above the first line: tight leading still paints into this inset instead of clipping.
-        let lineClash = max(0, natural - desired)
-        let pad = 16 + max(overflow.top, overflow.bottom) + lineClash
-        textView.clipsToBounds = false
-        textView.layer?.masksToBounds = false
-        if abs(textView.textContainerInset.height - pad) > 0.5 {
-            textView.textContainerInset = NSSize(width: 14, height: pad)
-        }
-        textView.layoutManager?.usesFontLeading = false
-        let paragraph = SpecimenParagraph.style(lineHeight: desired)
+        (textView as? InkTextView)?.fit(fonts: [font])
+        let paragraph = SpecimenParagraph.style(lineHeight: CGFloat(pointSize * leading))
         let attributes: [NSAttributedString.Key: Any] = [
             .font: font,
             .foregroundColor: textColor,
@@ -2965,10 +3236,7 @@ struct SpecimenEditor: NSViewRepresentable {
         }
 
         func report(_ view: NSTextView) {
-            guard let layout = view.layoutManager, let container = view.textContainer else { return }
-            layout.ensureLayout(for: container)
-            let used = layout.usedRect(for: container)
-            let height = max(used.height + view.textContainerInset.height * 2 + 8, 80)
+            guard let height = (view as? InkTextView)?.fittedHeight() else { return }
             guard abs(measuredHeight.wrappedValue - height) > 1 else { return }
             DispatchQueue.main.async {
                 self.measuredHeight.wrappedValue = height
@@ -3275,6 +3543,8 @@ private final class AlignColumnView: NSView {
 /// Fonts can be dropped on it.
 private struct WorkspaceTabCell: View {
     var title: String
+    /// What stands before the title in a window of its own: the list or view the window shows.
+    var lead: String? = nil
     var active: Bool
     var onFonts: ([String]) -> Bool
     var action: () -> Void
@@ -3288,10 +3558,25 @@ private struct WorkspaceTabCell: View {
 
     var body: some View {
         Button(action: action) {
-            Text(title)
-                .font(AppChrome.type(12, weight: active ? .medium : .regular))
-                .foregroundStyle(active || hovering || targeted ? surface.ink : surface.half)
-                .lineLimit(1)
+            HStack(spacing: 6) {
+                if let lead {
+                    Text(lead)
+                        .font(AppChrome.type(12, weight: .medium))
+                        .foregroundStyle(surface.ink)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Text(title)
+                        .font(AppChrome.type(12))
+                        .foregroundStyle(surface.half)
+                        .lineLimit(1)
+                        .layoutPriority(1)
+                } else {
+                    Text(title)
+                        .font(AppChrome.type(12, weight: active ? .medium : .regular))
+                        .foregroundStyle(active || hovering || targeted ? surface.ink : surface.half)
+                        .lineLimit(1)
+                }
+            }
                 .padding(.leading, 12)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .frame(height: 27)

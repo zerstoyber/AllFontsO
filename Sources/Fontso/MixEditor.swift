@@ -65,16 +65,16 @@ struct MixEditor: NSViewRepresentable {
         textView.isRichText = true
         textView.importsGraphics = false
         textView.drawsBackground = true
-        textView.isVerticallyResizable = true
-        textView.isHorizontallyResizable = false
-        textView.autoresizingMask = [.width]
-        textView.textContainerInset = NSSize(width: 14, height: 16)
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
         textView.isAutomaticTextReplacementEnabled = false
         textView.allowsUndo = true
         textView.delegate = context.coordinator
         textView.string = text
+        textView.onWidthChange = { [weak textView, weak coordinator = context.coordinator] in
+            guard let textView else { return }
+            coordinator?.report(textView)
+        }
         return textView
     }
 
@@ -88,17 +88,7 @@ struct MixEditor: NSViewRepresentable {
             textView.selectedRanges = selected
         }
         let desired = CGFloat(pointSize * leading)
-        let used = Set(fonts.values).union([fallback])
-        var pad: CGFloat = 16
-        for font in used {
-            let overflow = SpecimenInk.overflow(font: font, text: textView.string)
-            let natural = font.ascender + abs(font.descender) + max(font.leading, 0)
-            pad = max(pad, 16 + max(overflow.top, overflow.bottom) + max(0, natural - desired))
-        }
-        if abs(textView.textContainerInset.height - pad) > 0.5 {
-            textView.textContainerInset = NSSize(width: 14, height: pad)
-        }
-        textView.layoutManager?.usesFontLeading = false
+        textView.fit(fonts: Array(Set(fonts.values).union([fallback])))
         let paragraph = SpecimenParagraph.style(lineHeight: desired)
         let base: [NSAttributedString.Key: Any] = [
             .font: fallback,
@@ -161,10 +151,7 @@ struct MixEditor: NSViewRepresentable {
         }
 
         func report(_ view: NSTextView) {
-            guard let layout = view.layoutManager, let container = view.textContainer else { return }
-            layout.ensureLayout(for: container)
-            let used = layout.usedRect(for: container)
-            let height = max(used.height + view.textContainerInset.height * 2 + 8, 80)
+            guard let height = (view as? InkTextView)?.fittedHeight() else { return }
             guard abs(parent.measuredHeight - height) > 1 else { return }
             DispatchQueue.main.async {
                 self.parent.measuredHeight = height
@@ -175,29 +162,14 @@ struct MixEditor: NSViewRepresentable {
 
 /// TextKit 1 text view that takes font drags itself: a font dropped on a letter goes to that letter
 /// (or to the whole selection when dropped inside it) instead of being inserted as text.
-final class MixTextView: NSTextView {
+final class MixTextView: InkTextView {
     var onDropFont: ([String], Int?) -> Void = { _, _ in }
     var onClick: () -> Void = {}
     private static let fontType = NSPasteboard.PasteboardType("public.json")
 
-    init() {
-        let storage = NSTextStorage()
-        let layout = NSLayoutManager()
-        layout.usesFontLeading = false
-        storage.addLayoutManager(layout)
-        let container = NSTextContainer(size: NSSize(width: 100, height: CGFloat.greatestFiniteMagnitude))
-        container.widthTracksTextView = true
-        container.heightTracksTextView = false
-        layout.addTextContainer(container)
-        super.init(frame: .zero, textContainer: container)
-        clipsToBounds = false
-        unregisterDraggedTypes()
+    override init() {
+        super.init()
         registerForDraggedTypes([MixTextView.fontType])
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) is unused")
     }
 
     override var acceptableDragTypes: [NSPasteboard.PasteboardType] { [MixTextView.fontType] }
@@ -205,13 +177,6 @@ final class MixTextView: NSTextView {
     override func mouseDown(with event: NSEvent) {
         onClick()
         super.mouseDown(with: event)
-    }
-
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        clipsToBounds = false
-        layer?.masksToBounds = false
-        superview?.clipsToBounds = false
     }
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation { .copy }
@@ -245,9 +210,5 @@ final class MixTextView: NSTextView {
         let character = layout.characterIndexForGlyph(at: glyph)
         guard character < storage.length else { return nil }
         return (storage.string as NSString).rangeOfComposedCharacterSequence(at: character).location
-    }
-
-    override func scrollWheel(with event: NSEvent) {
-        ScrollWheelForwarding.pass(event, from: self)
     }
 }
