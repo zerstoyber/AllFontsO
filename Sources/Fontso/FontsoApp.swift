@@ -44,6 +44,31 @@ struct FontsoApp: App {
         }
         .defaultSize(width: 960, height: 720)
         .commandsRemoved()
+        // Info beside the main window. While it is open, the panel under the navigation steps aside.
+        Window("Info", id: "info") {
+            InfoWindow()
+                .environment(store)
+                .chromeDefaults()
+                .frame(minWidth: 280, minHeight: 320)
+        }
+        .defaultSize(width: 340, height: 640)
+        .commandsRemoved()
+    }
+}
+
+/// Info for the selected font, in a window of its own. It shows the same sections as the panel under the navigation.
+struct InfoWindow: View {
+    @Environment(LibraryStore.self) private var store
+
+    var body: some View {
+        SpecimenView(role: .info, infoFillsWindow: true)
+            .padding(AppChrome.inset)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(AppChrome.window)
+            .navigationTitle("AllFontsO · Info")
+            .onAppear { store.infoWindowOpen = true }
+            .onDisappear { store.infoWindowOpen = false }
+            .background(WindowCloseWatch { store.infoWindowOpen = false })
     }
 }
 
@@ -80,6 +105,10 @@ struct DetachedWorkspace: View {
             .onAppear { store.windowOpened(window) }
             .onDisappear { store.windowClosed(window) }
             .background(WindowCloseWatch { store.windowClosed(window) })
+            .background(DeleteKeyCatcher {
+                guard window.tab == .preview, case .group(let id) = window.filter else { return false }
+                return store.handleDeleteKey(inList: id)
+            })
     }
 }
 

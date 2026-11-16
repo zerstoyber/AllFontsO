@@ -66,3 +66,51 @@ struct ArrowKeyCatcher: NSViewRepresentable {
         }
     }
 }
+
+/// Hands the Delete key and the Forward Delete key (Entfernen) to the closure, unless a text field has them.
+/// A dialog that is already open keeps the key too.
+struct DeleteKeyCatcher: NSViewRepresentable {
+    var handle: () -> Bool
+
+    func makeNSView(context: Context) -> CatcherView {
+        let view = CatcherView()
+        view.handle = handle
+        return view
+    }
+
+    func updateNSView(_ view: CatcherView, context: Context) {
+        view.handle = handle
+    }
+
+    final class CatcherView: NSView {
+        var handle: (() -> Bool)?
+        private var monitor: Any?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            removeMonitor()
+            guard window != nil else { return }
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                guard let self, let window = self.window, event.window === window else { return event }
+                // 51 is Delete, 117 is Forward Delete, the key labelled Entfernen.
+                guard event.keyCode == 51 || event.keyCode == 117 else { return event }
+                if NSApp.modalWindow != nil { return event }
+                let flags = event.modifierFlags.intersection([.command, .option, .control])
+                if !flags.isEmpty { return event }
+                if window.firstResponder is NSText { return event }
+                return self.handle?() == true ? nil : event
+            }
+        }
+
+        deinit {
+            removeMonitor()
+        }
+
+        private func removeMonitor() {
+            if let monitor {
+                NSEvent.removeMonitor(monitor)
+                self.monitor = nil
+            }
+        }
+    }
+}

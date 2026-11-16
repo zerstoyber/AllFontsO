@@ -682,8 +682,6 @@ struct FontBrowserView: View {
 
     private var emptyFilterText: String {
         switch store.filter {
-        case .favorites:
-            return "Mark fonts with the star. You can also drag them here."
         case .group:
             return "Drag fonts onto this list."
         case .compare:
@@ -718,9 +716,6 @@ struct FontBrowserView: View {
     /// Context menu for a row. Given the family, the row stands for every cut of that family in the list.
     @ViewBuilder
     private func rowMenu(_ face: FontFace, family: BrowseFamily? = nil) -> some View {
-        Button(store.isFavorite(face) ? "Remove favorite" : "Add to favorites") {
-            store.toggleFavorite(face)
-        }
         Menu("Add to list") {
             if store.groups.isEmpty {
                 Button("New list…") { store.showNewGroup = true }
@@ -847,14 +842,6 @@ private struct FontRow: View {
             Text(face.format.uppercased())
                 .font(.uiCaption2.weight(.medium))
                 .foregroundStyle(.secondary)
-            Button {
-                store.toggleFavorite(face)
-            } label: {
-                Image(systemName: store.isFavorite(face) ? "star.fill" : "star")
-                    .foregroundStyle(store.isFavorite(face) ? Color.orange : Color.secondary)
-            }
-            .buttonStyle(.borderless)
-            .help(store.isFavorite(face) ? "Remove favorite" : "Add to favorites")
         }
         .padding(.vertical, 2)
     }

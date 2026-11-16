@@ -139,6 +139,12 @@ struct ContentView: View {
             openWindow(id: "workspace", value: window)
             store.detachRequest = nil
         }
+        .onChange(of: store.infoWindowRequest) { _, open in
+            guard open else { return }
+            openWindow(id: "info")
+            store.infoWindowRequest = false
+        }
+        .background(DeleteKeyCatcher { store.handleDeleteKey() })
         .sheet(item: $helpTopic) { topic in
             HelpSheet(topic: topic)
         }
@@ -275,7 +281,10 @@ struct ContentView: View {
                     VStack(spacing: 0) {
                         SidebarView()
                             .chromePanel()
-                        SpecimenView(role: .info, infoLimit: max(140, proxy.size.height * 0.7))
+                        // While Info stands in its own window it leaves this place, and the navigation takes the room.
+                        if !store.infoWindowOpen {
+                            SpecimenView(role: .info, infoLimit: max(140, proxy.size.height * 0.7))
+                        }
                     }
                 }
                 .frame(width: min(420, max(260, navigationWidth)))
@@ -793,14 +802,6 @@ struct SidebarView: View {
             familyRows(owners, filter: .desktop)
             tracked(viewRow("Trial", filter: .category(.trial)), .category(.trial))
             familyRows(owners, filter: .category(.trial))
-            tracked(
-                viewRow("Favorites", filter: .favorites) { items, _ in
-                    store.setFavorites(items.flatMap(\.identities), on: true)
-                    return true
-                },
-                .favorites
-            )
-            familyRows(owners, filter: .favorites)
             tracked(viewRow("Licensed", filter: .licensed, warning: expiredLicenseWarning), .licensed)
                 .help((expiredLicenseWarning.map { $0 + " " } ?? "") + "Cuts with a license. Select a cut and enter the project under Info › License.")
             familyRows(owners, filter: .licensed)
@@ -852,7 +853,7 @@ struct SidebarView: View {
                 .contextMenu {
                     Button("Rename") { store.beginRenameChat(chat) }
                     Button("Delete chat", role: .destructive) {
-                        store.deleteResearchChat(chat)
+                        store.offerDeleteChat(chat)
                     }
                 }
             }
@@ -1036,7 +1037,7 @@ struct SidebarView: View {
                 }
             }
             Divider()
-            Button("Delete list", role: .destructive) { store.deleteGroup(group) }
+            Button("Delete list", role: .destructive) { store.offerDeleteList(group) }
         }
     }
 
@@ -1169,6 +1170,11 @@ private struct SidebarDropRow: View {
         .modifier(OptionalListDrag(item: dragItem))
         .onTapGesture {
             store.filter = filter
+            switch filter {
+            case .group(let id): store.keyTarget = .list(id)
+            case .research(let id): store.keyTarget = .chat(id)
+            default: store.keyTarget = .font
+            }
         }
     }
 
@@ -1248,6 +1254,11 @@ private struct SidebarFamilyRow: View {
                     store.addToPreview(faces.map(\.identity))
                 }
             }
+            if case .group(let id) = filter {
+                Button("Remove from list", role: .destructive) {
+                    store.offerFontRemoval(groupID: id, identities: faces.map(\.identity))
+                }
+            }
             Button("Send to Use") { store.addToPlayground([family.lead.identity]) }
         }
     }
@@ -1281,6 +1292,9 @@ private struct SidebarLinkRow: View {
         .background(selected ? AppChrome.selection : Color.clear, in: RoundedRectangle(cornerRadius: 4, style: .continuous))
         .modifier(RowHover(radius: 4))
         .onTapGesture {
+            if case .group(let id) = filter {
+                store.keyTarget = .link(groupID: id, nameKey: item.nameKey)
+            }
             if store.filter != filter {
                 // Changing the view empties the outside selection; this one is put back once that has happened.
                 store.pendingOutside = item
@@ -1293,7 +1307,7 @@ private struct SidebarLinkRow: View {
         .contextMenu {
             Button("Open in browser") { NSWorkspace.shared.open(item.url) }
             if case .group(let id) = filter {
-                Button("Remove from list", role: .destructive) { store.removeListLink(id, item: item) }
+                Button("Remove from list", role: .destructive) { store.offerRemoveLink(groupID: id, item: item) }
             }
         }
     }
@@ -1458,6 +1472,7 @@ struct FontsoCommands: Commands {
                 .disabled(store.mcpEnabled)
             Button("News from Foundries") { store.filter = .news(.fresh) }
             Button("Foundries…") { store.showFoundries = true }
+            Button("Info in its own window") { store.openInfoWindow() }
             Button("Review library…") { store.showReview = true }
             Button("Organize on disk…") { store.organizeOnDisk() }
             Divider()

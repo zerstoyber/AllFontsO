@@ -365,15 +365,6 @@ enum MCPTools {
                 required: ["list", "family"]
             ),
             tool(
-                "set_favorite",
-                "Mark a family as a favorite, or take the mark away.",
-                properties: [
-                    "family": ["type": "string"],
-                    "favorite": ["type": "boolean"]
-                ],
-                required: ["family", "favorite"]
-            ),
-            tool(
                 "news",
                 "New font names and posts from the foundries the user follows. Nothing is downloaded.",
                 properties: ["limit": ["type": "integer"]],
@@ -499,11 +490,6 @@ enum MCPTools {
             let faces = try cuts(arguments, store: store)
             store.removeFromGroup(group.id, identities: faces.map(\.identity))
             return "Removed \(faces[0].family) from \(group.name)."
-        case "set_favorite":
-            let faces = try cuts(arguments, store: store)
-            let on = arguments["favorite"] as? Bool ?? true
-            store.setFavorites(faces.map(\.identity), on: on)
-            return on ? "\(faces[0].family) is a favorite." : "\(faces[0].family) is no longer a favorite."
         case "news":
             let limit = clamp(arguments["limit"], fallback: 20, max: 60)
             let items = store.notices.filter { !$0.seen }.prefix(limit)

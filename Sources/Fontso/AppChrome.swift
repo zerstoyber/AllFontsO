@@ -91,7 +91,7 @@ enum AppChrome {
 
     /// The version the bundle carries. Run outside a bundle, as in a debug build, it is the current one.
     static var version: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.2"
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.2.2"
     }
 
     static var versionText: String {

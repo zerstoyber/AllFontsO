@@ -211,6 +211,8 @@ struct SpecimenView: View {
     var role = Role.workspace
     /// The most room Info may take, so the navigation above keeps its share.
     var infoLimit: CGFloat = 600
+    /// Info filling a window of its own, rather than the panel under the navigation.
+    var infoFillsWindow = false
     /// The one mode a window of its own shows. Without it the view follows the tab chosen in the main window.
     var fixedTab: WorkspaceTab? = nil
     /// The list or library view a Preview window of its own keeps, whatever the navigation goes on to.
@@ -1024,34 +1026,53 @@ struct SpecimenView: View {
     /// Everything about the selected cut: metadata, activation, lists, license, OpenType features, characters, notes.
     private var infoPanel: some View {
         let face = store.selection.first.flatMap { store.face(id: $0) }
-        let open = store.infoPanelOpen
+        let open = infoFillsWindow || store.infoPanelOpen
         return VStack(spacing: 0) {
-            infoHandle(active: open && face != nil)
+            if !infoFillsWindow {
+                infoHandle(active: open && face != nil)
+            }
             VStack(spacing: 0) {
-                Button {
-                    store.infoPanelOpen.toggle()
-                } label: {
-                    HStack(spacing: 6) {
-                        Text("Info")
-                            .foregroundStyle(tone.ink)
-                        Text(face.map { "\($0.family) \($0.style)" } ?? "No font selected")
-                            .foregroundStyle(tone.half)
-                            .lineLimit(1)
-                        Spacer(minLength: 4)
-                        if face != nil {
-                            ChromeChevron(open: open, color: tone.half)
+                HStack(spacing: 0) {
+                    Button {
+                        store.infoPanelOpen.toggle()
+                    } label: {
+                        HStack(spacing: 6) {
+                            Text("Info")
+                                .foregroundStyle(tone.ink)
+                            Text(face.map { "\($0.family) \($0.style)" } ?? "No font selected")
+                                .foregroundStyle(tone.half)
+                                .lineLimit(1)
+                            Spacer(minLength: 4)
+                            if face != nil, !infoFillsWindow {
+                                ChromeChevron(open: open, color: tone.half)
+                            }
                         }
+                        .font(AppChrome.type())
+                        .padding(.horizontal, 10)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .frame(height: 30)
+                        .contentShape(Rectangle())
                     }
-                    .font(AppChrome.type())
-                    .padding(.horizontal, 10)
-                    .frame(height: 30)
-                    .contentShape(Rectangle())
+                    .buttonStyle(.plain)
+                    .disabled(face == nil || infoFillsWindow)
+                    .help(infoFillsWindow
+                        ? "Info for the selected font"
+                        : face == nil
+                            ? "Select a font: click its name, its sample, or Info. Its metadata, lists, license, OpenType features, characters, and notes show here."
+                            : open ? "Fold Info away" : "Show Info for the selected font")
+                    if !infoFillsWindow {
+                        IconChip(
+                            symbol: "macwindow.on.rectangle",
+                            help: "Open Info in a window of its own. It leaves the bottom left until that window is closed."
+                        ) {
+                            store.openInfoWindow()
+                        }
+                        .padding(.trailing, 8)
+                    }
                 }
-                .buttonStyle(.plain)
-                .disabled(face == nil)
-                .help(face == nil
-                    ? "Select a font: click its name, its sample, or Info. Its metadata, lists, license, OpenType features, characters, and notes show here."
-                    : open ? "Fold Info away" : "Show Info for the selected font")
+                .contextMenu {
+                    Button("Open in its own window") { store.openInfoWindow() }
+                }
                 if open, let face {
                     // The title stays; what scrolls under it is set off by a line.
                     Rectangle()
@@ -1060,13 +1081,18 @@ struct SpecimenView: View {
                     ScrollView {
                         infoContent(face)
                     }
-                    .frame(height: min(infoHeight, infoLimit))
+                    .frame(maxHeight: infoFillsWindow ? .infinity : nil)
+                    .frame(height: infoFillsWindow ? nil : min(infoHeight, infoLimit))
+                } else if infoFillsWindow {
+                    Spacer(minLength: 0)
                 }
             }
             .chromePanel()
+            .frame(maxHeight: infoFillsWindow ? .infinity : nil)
             // Without a font there is nothing to show: the panel steps back.
             .opacity(face == nil ? 0.45 : 1)
         }
+        .frame(maxHeight: infoFillsWindow ? .infinity : nil)
         .paperColors(ink: AppChrome.ink, paper: AppChrome.panel)
         .onChange(of: face?.id) { _, _ in
             glyphScalars = []
@@ -1885,6 +1911,13 @@ struct SpecimenView: View {
             .padding(.bottom, 2)
             .contentShape(Rectangle())
             .onTapGesture { store.selectInPreview(face, scroll: false) }
+            .contextMenu {
+                if viewIsList {
+                    Button("Remove from list", role: .destructive) {
+                        offerRemoval(face, family: family, folded: folded)
+                    }
+                }
+            }
             .draggable(FontDragItem(identities: [face.identity]))
             .dropDestination(for: FontDragItem.self) { items, _ in
                 let identities = items.flatMap(\.identities)
@@ -2149,6 +2182,18 @@ struct SpecimenView: View {
         let base = paper.usingColorSpace(.sRGB) ?? paper
         let top = inkNS.usingColorSpace(.sRGB) ?? inkNS
         return base.blended(withFraction: 0.15, of: top) ?? base
+    }
+
+    /// The fonts a right-click or the Delete key would take out of the open list: a folded family as a whole,
+    /// otherwise the selected cuts when this one is among them.
+    private func offerRemoval(_ face: FontFace, family: [FontFace], folded: Bool) {
+        guard case .group(let id) = viewFilter else { return }
+        let pool = folded
+            ? family.map(\.identity)
+            : store.selection.contains(face.id) && store.selection.count > 1
+                ? store.selection.compactMap { store.face(id: $0)?.identity }
+                : [face.identity]
+        store.offerFontRemoval(groupID: id, identities: pool)
     }
 
     private func heightBinding(_ id: Int64) -> Binding<CGFloat> {

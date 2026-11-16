@@ -3,6 +3,14 @@ import FontsoCore
 import SwiftUI
 import UniformTypeIdentifiers
 
+/// What the Delete key acts on: the font last clicked, or the list, chat, or link last clicked.
+enum KeyTarget: Equatable {
+    case font
+    case list(Int64)
+    case chat(Int64)
+    case link(groupID: Int64, nameKey: String)
+}
+
 struct TitlePending: Equatable {
     enum Kind: Equatable {
         case chat
@@ -1498,6 +1506,7 @@ final class LibraryStore {
     /// panel is open; only asking for Info by name opens a folded one.
     func selectInPreview(_ face: FontFace, scroll: Bool = true, showInfo: Bool = false) {
         selection = [face.id]
+        keyTarget = .font
         if showInfo { infoPanelOpen = true }
         if scroll {
             focusPreviewID = face.id
@@ -1507,6 +1516,118 @@ final class LibraryStore {
     /// The Info panel under the navigation: everything about the selected cut.
     var infoPanelOpen = UserDefaults.standard.object(forKey: "fontso.infoPanelOpen") as? Bool ?? true {
         didSet { UserDefaults.standard.set(infoPanelOpen, forKey: "fontso.infoPanelOpen") }
+    }
+    /// The last thing clicked, so the Delete key knows whether it takes a font out of a list or deletes the list itself.
+    var keyTarget: KeyTarget = .font
+    /// Set when Info should open in a window of its own. The main window opens it and clears this.
+    var infoWindowRequest = false
+    /// True while that window is open: Info then leaves the bottom left.
+    var infoWindowOpen = false
+
+    func openInfoWindow() {
+        infoWindowRequest = true
+    }
+
+    /// The Delete key. In a list window it takes the selected fonts out of that list. In the main window it follows
+    /// the last click: a font leaves the open list, a list or a chat is deleted. It always asks first.
+    func handleDeleteKey(inList listID: Int64? = nil) -> Bool {
+        if let listID {
+            return offerFontRemoval(groupID: listID, identities: selectedIdentities)
+        }
+        switch keyTarget {
+        case .font:
+            guard case .group(let id) = filter else { return false }
+            return offerFontRemoval(groupID: id, identities: selectedIdentities)
+        case .list(let id):
+            guard case .group(let current) = filter, current == id,
+                  let group = groups.first(where: { $0.id == id }) else { return false }
+            return offerDeleteList(group)
+        case .chat(let id):
+            guard case .research(let current) = filter, current == id,
+                  let chat = researchChats.first(where: { $0.id == id }) else { return false }
+            return offerDeleteChat(chat)
+        case .link(let id, let key):
+            guard case .group(let current) = filter, current == id,
+                  let item = listLinks[id]?.first(where: { $0.nameKey == key }) else { return false }
+            return offerRemoveLink(groupID: id, item: item)
+        }
+    }
+
+    /// Asks, then takes these fonts out of one list. Fonts that are not in the list are skipped.
+    @discardableResult
+    func offerFontRemoval(groupID: Int64, identities: [String]) -> Bool {
+        let keys = memberIdentities(in: groupID, among: identities)
+        guard !keys.isEmpty, let group = groups.first(where: { $0.id == groupID }) else { return false }
+        guard confirm(
+            fontRemovalTitle(keys, list: group.name),
+            detail: "The fonts stay in the library. They only leave this list.",
+            button: "Remove"
+        ) else { return true }
+        removeFromGroup(groupID, identities: keys)
+        return true
+    }
+
+    /// Asks, then deletes the list. The fonts stay in the library.
+    @discardableResult
+    func offerDeleteList(_ group: FontGroup) -> Bool {
+        let detail = hasChildGroups(group.id)
+            ? "The fonts stay in the library. Lists inside this one move up one level."
+            : "The fonts stay in the library. Only the list goes."
+        guard confirm("Delete the list “\(group.name)”?", detail: detail, button: "Delete") else { return true }
+        deleteGroup(group)
+        return true
+    }
+
+    /// Asks, then deletes the chat.
+    @discardableResult
+    func offerDeleteChat(_ chat: ResearchChat) -> Bool {
+        guard confirm("Delete the chat “\(chat.title)”?", detail: "The conversation is removed.", button: "Delete") else { return true }
+        deleteResearchChat(chat)
+        return true
+    }
+
+    /// Asks, then takes a saved link out of a list.
+    @discardableResult
+    func offerRemoveLink(groupID: Int64, item: OutsideFont) -> Bool {
+        guard let group = groups.first(where: { $0.id == groupID }) else { return false }
+        guard confirm(
+            "Remove \(item.name) from “\(group.name)”?",
+            detail: "The link leaves this list.",
+            button: "Remove"
+        ) else { return true }
+        removeListLink(groupID, item: item)
+        return true
+    }
+
+    private var selectedIdentities: [String] {
+        selection.compactMap { face(id: $0)?.identity }
+    }
+
+    private func memberIdentities(in groupID: Int64, among identities: [String]) -> [String] {
+        let members = membership[groupID] ?? []
+        var seen = Set<String>()
+        return identities.filter { members.contains($0) && seen.insert($0).inserted }
+    }
+
+    private func fontRemovalTitle(_ keys: [String], list: String) -> String {
+        if keys.count == 1, let face = fonts.first(where: { $0.identity == keys[0] }) {
+            return "Remove \(face.family) \(face.style) from “\(list)”?"
+        }
+        let families = Set(keys.compactMap { key in fonts.first { $0.identity == key }?.family })
+        if families.count == 1, let name = families.first {
+            return "Remove \(name) (\(keys.count) styles) from “\(list)”?"
+        }
+        return "Remove \(keys.count) fonts from “\(list)”?"
+    }
+
+    private func confirm(_ title: String, detail: String, button: String) -> Bool {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = detail
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: button)
+        alert.addButton(withTitle: "Cancel")
+        return alert.runModal() == .alertFirstButtonReturn
     }
 
     /// OpenType switches moved away from the font's defaults, by feature id. Set in Info, applied to every font

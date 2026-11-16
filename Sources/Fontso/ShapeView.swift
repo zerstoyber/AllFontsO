@@ -768,8 +768,5 @@ struct ShapeView: View {
                 Button(store.menuTitle(group)) { store.addToGroup(group.id, identities: identities) }
             }
         }
-        Button(store.isFavorite(face) ? "Remove favorite" : "Add to favorites") {
-            store.toggleFavorite(face)
-        }
     }
 }
