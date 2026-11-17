@@ -33,7 +33,8 @@ public enum SearchScope: String, CaseIterable, Identifiable, Sendable {
 
     /// Split and fold the query once, then test many faces with `matches(_:terms:fields:)`.
     public static func terms(in query: String) -> [[UInt8]] {
-        query
+        let cleaned = String(query.unicodeScalars.filter { !$0.properties.isDefaultIgnorableCodePoint })
+        return cleaned
             .split(whereSeparator: \.isWhitespace)
             .map { Array(TextFold.fold(String($0)).utf8) }
             .filter { !$0.isEmpty }

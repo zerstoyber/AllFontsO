@@ -128,10 +128,20 @@ public enum FontIndexer {
         let reading = URL(fileURLWithPath: openPath)
         let metrics = SfntReader.readFaces(at: reading)
         let probed = FontProbe.read(url: reading)
-        guard !probed.isEmpty else { return [] }
+        let names = activeNames ?? FontActivator.activePostScriptNames()
+        guard !probed.isEmpty else {
+            // Core Text refuses some system fonts. Keep the file under its name so a search still finds it.
+            return [namedFace(
+                fileURL: fileURL,
+                path: path,
+                fileSize: fileSize,
+                modifiedAt: modifiedAt,
+                unpackedPath: unpackedPath,
+                activeNames: names
+            )]
+        }
 
         let shared = metrics.count == 1 ? metrics[0] : nil
-        let names = activeNames ?? FontActivator.activePostScriptNames()
         return probed.enumerated().map { index, face in
             let metric = index < metrics.count ? metrics[index] : shared
             let familyName = face.family.isEmpty ? fileURL.deletingPathExtension().lastPathComponent : face.family
@@ -194,6 +204,56 @@ public enum FontIndexer {
                 categorySource: source
             )
         }
+    }
+
+    /// A face Core Text would not describe, named from the file so search can still find it.
+    private static func namedFace(
+        fileURL: URL,
+        path: String,
+        fileSize: Int64,
+        modifiedAt: Date,
+        unpackedPath: String,
+        activeNames: Set<String>
+    ) -> FontFace {
+        let name = fileURL.deletingPathExtension().lastPathComponent
+        let format = fileURL.pathExtension.lowercased()
+        return FontFace(
+            id: 0,
+            filePath: path,
+            faceIndex: 0,
+            family: name,
+            style: "Regular",
+            fullName: name,
+            postscriptName: "",
+            version: "",
+            manufacturer: "",
+            designer: "",
+            copyright: "",
+            format: format.isEmpty ? "font" : format,
+            isVariable: false,
+            weightClass: 400,
+            widthClass: 0,
+            category: .unclassified,
+            isItalic: false,
+            glyphCount: 0,
+            axes: [],
+            fileSize: fileSize,
+            modifiedAt: modifiedAt,
+            activation: FontActivator.availability(
+                libraryPath: path,
+                postScriptName: "",
+                activeNames: activeNames
+            ),
+            xHeight: 0,
+            capHeight: 0,
+            averageWidth: 0,
+            contrast: 0,
+            coversLatin: false,
+            coversCyrillic: false,
+            coversGreek: false,
+            unpackedPath: unpackedPath,
+            categorySource: .none
+        )
     }
 
     /// X-height, cap height, average width, contrast, and script coverage from the font file. One entry per face, in file order.
@@ -320,7 +380,27 @@ public enum FontIndexer {
                 ))
             }
         }
+        let rootPath = normalizeFontPath(root.path)
+        if rootPath == "/System/Library/Fonts" {
+            files.append(contentsOf: availableSystemRecords())
+        }
         return files
+    }
+
+    /// Font files macOS itself can open under /System/Library/Fonts. The folder walk misses some of them.
+    private static func availableSystemRecords() -> [FontFileRecord] {
+        guard let urls = CTFontManagerCopyAvailableFontURLs() as? [URL] else { return [] }
+        var records: [FontFileRecord] = []
+        for url in urls {
+            let path = normalizeFontPath(url.path)
+            guard SystemFontLocations.isProtected(path) else { continue }
+            guard extensions.contains(url.pathExtension.lowercased()) else { continue }
+            let attributes = try? FileManager.default.attributesOfItem(atPath: path)
+            let size = (attributes?[.size] as? NSNumber)?.int64Value ?? 0
+            let modified = (attributes?[.modificationDate] as? Date) ?? Date(timeIntervalSince1970: 0)
+            records.append(FontFileRecord(path: path, fileSize: size, modifiedAt: modified))
+        }
+        return records
     }
 
     private static func sameFile(_ stored: FontFileRecord, _ file: FontFileRecord) -> Bool {

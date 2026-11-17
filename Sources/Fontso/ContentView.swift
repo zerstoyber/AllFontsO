@@ -32,6 +32,7 @@ struct ContentView: View {
         .onChange(of: store.sortAscending) { _, _ in store.persistPreferences() }
         .onChange(of: store.searchFields) { _, _ in store.persistPreferences() }
         .onChange(of: store.showTrials) { _, _ in store.persistPreferences() }
+        .onChange(of: store.hideSystem) { _, _ in store.persistPreferences() }
         .onChange(of: store.selection) { _, selection in
             guard !selection.isEmpty, !store.outsideSelection.isEmpty else { return }
             switch store.filter {

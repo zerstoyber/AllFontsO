@@ -4,9 +4,20 @@ import Foundation
 public enum TextFold {
     public static func fold(_ value: String) -> String {
         if value.utf8.allSatisfy({ $0 < 128 }) {
-            return value.lowercased()
+            return asciiLowercased(value)
         }
-        return value.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+        // A fixed locale, so "Times" matches "times" on every Mac language. The user's locale
+        // turns a capital I into a different letter on some of them.
+        return value.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "en_US_POSIX"))
+    }
+
+    /// ASCII case fold that does not consult the Mac's language.
+    private static func asciiLowercased(_ value: String) -> String {
+        var bytes = Array(value.utf8)
+        for index in bytes.indices where bytes[index] >= 65 && bytes[index] <= 90 {
+            bytes[index] += 32
+        }
+        return String(bytes: bytes, encoding: .utf8) ?? value
     }
 
     /// Plain byte search, far cheaper than Foundation's `contains` for short names.

@@ -403,6 +403,9 @@ struct PlaygroundView: View {
 
     private func blockView(_ block: Binding<PlaygroundBlock>) -> some View {
         let value = block.wrappedValue
+        // ForEach's binding is an index. Removing the block makes that index invalid, and the text view
+        // still reports its selection on the next turn. Look the block up by id instead.
+        let live = blockBinding(value)
         let face = face(for: value.fontIdentity)
         // A block is chosen by a click, not by the pointer passing over it: only then do its tools show and the
         // strip at the bottom adjusts it.
@@ -412,7 +415,7 @@ struct PlaygroundView: View {
             if let face {
                 // Every block can give single letters a cut of their own; without any, it is set in one font.
                 MixEditor(
-                    text: block.text,
+                    text: live.text,
                     fonts: mixFonts(value),
                     fallback: SpecimenFont.make(path: face.filePath, index: face.faceIndex, size: value.size, variations: [:]) ?? .systemFont(ofSize: value.size),
                     marked: [],
@@ -423,37 +426,41 @@ struct PlaygroundView: View {
                     background: paper,
                     measuredHeight: heightBinding(value.id),
                     onEdit: { range, length in
-                        block.wrappedValue.shiftLetters(replacing: range, with: length)
+                        guard document.blocks.contains(where: { $0.id == value.id }) else { return }
+                        live.wrappedValue.shiftLetters(replacing: range, with: length)
                     },
                     onSelect: { range in
+                        guard let current = document.blocks.first(where: { $0.id == value.id }) else { return }
                         selections[value.id] = range
                         // In the chosen block, Info shows the cut under the cursor.
                         if activeBlock == value.id {
-                            showInfo(block.wrappedValue, at: range.location)
+                            showInfo(current, at: range.location)
                         }
                     },
                     // A click into a block makes it the one with the tools, the one the strip at the bottom adjusts.
                     onClick: {
+                        guard let current = document.blocks.first(where: { $0.id == value.id }) else { return }
                         activeBlock = value.id
-                        showInfo(block.wrappedValue)
+                        showInfo(current)
                     },
                     onDropFont: { identities, offset in
+                        guard document.blocks.contains(where: { $0.id == value.id }) else { return }
                         guard let identity = identities.first(where: store.hasFace(identity:)) else { return }
-                        let selected = selectedLetters(block.wrappedValue)
-                        let selection = selections[block.wrappedValue.id] ?? NSRange(location: 0, length: 0)
+                        let selected = selectedLetters(live.wrappedValue)
+                        let selection = selections[value.id] ?? NSRange(location: 0, length: 0)
                         if let offset, !selected.isEmpty, NSLocationInRange(offset, selection) {
                             document.change(undoManager, "Set Letters") {
-                                block.wrappedValue.setFont(identity, forLettersIn: selected)
+                                live.wrappedValue.setFont(identity, forLettersIn: selected)
                             }
-                        } else if let offset, block.wrappedValue.isMix {
-                            let letter = (block.wrappedValue.text as NSString).rangeOfComposedCharacterSequence(at: offset)
+                        } else if let offset, live.wrappedValue.isMix {
+                            let letter = (live.wrappedValue.text as NSString).rangeOfComposedCharacterSequence(at: offset)
                             document.change(undoManager, "Set Letter") {
-                                block.wrappedValue.setFont(identity, forLettersIn: [letter])
+                                live.wrappedValue.setFont(identity, forLettersIn: [letter])
                             }
                         } else {
                             document.change(undoManager, "Set Font") {
-                                block.wrappedValue.fontIdentity = identity
-                                block.wrappedValue.letters = []
+                                live.wrappedValue.fontIdentity = identity
+                                live.wrappedValue.letters = []
                             }
                         }
                     }
@@ -483,7 +490,7 @@ struct PlaygroundView: View {
         }
         .overlay(alignment: .topTrailing) {
             if showsTools {
-                tools(block, face: face)
+                tools(live, face: face)
                     .padding(8)
                     .transition(.opacity)
             }
@@ -510,8 +517,8 @@ struct PlaygroundView: View {
             guard let identity = items.flatMap(\.identities).first,
                   store.hasFace(identity: identity) else { return false }
             document.change(undoManager, "Set Font") {
-                block.wrappedValue.fontIdentity = identity
-                block.wrappedValue.letters = []
+                live.wrappedValue.fontIdentity = identity
+                live.wrappedValue.letters = []
             }
             return true
         }
@@ -548,7 +555,12 @@ struct PlaygroundView: View {
                 document.change(undoManager, "Duplicate Block") { document.blocks.insert(copy, at: index + 1) }
             }
             toolButton("xmark", help: "Remove this block", disabled: document.blocks.count == 1) {
-                document.change(undoManager, "Remove Block") { _ = document.blocks.remove(at: index) }
+                let id = value.id
+                if activeBlock == id { activeBlock = nil }
+                document.change(undoManager, "Remove Block") {
+                    guard let current = document.blocks.firstIndex(where: { $0.id == id }) else { return }
+                    document.blocks.remove(at: current)
+                }
             }
         }
         .padding(.horizontal, 6)

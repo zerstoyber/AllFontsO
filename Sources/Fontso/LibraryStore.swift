@@ -236,6 +236,7 @@ final class LibraryStore {
     var query = ""
     var showTrials: Bool
     // Each filter bumps the list revision, so the grouped list rebuilds along with the visible faces.
+    var hideSystem = false { didSet { listRevision += 1 } }
     var onlyActive = false { didSet { listRevision += 1 } }
     var onlyVariable = false { didSet { listRevision += 1 } }
     var onlyLicensed = false { didSet { listRevision += 1 } }
@@ -408,6 +409,7 @@ final class LibraryStore {
         let fields = Set(storedFields.split(separator: ",").compactMap { SearchScope(rawValue: String($0)) })
         searchFields = fields.isEmpty ? [.all] : fields
         showTrials = UserDefaults.standard.object(forKey: "fontso.showTrials") as? Bool ?? true
+        hideSystem = UserDefaults.standard.object(forKey: "fontso.hideSystem") as? Bool ?? false
         do {
             database = try FontDatabase.live()
         } catch {
@@ -473,6 +475,7 @@ final class LibraryStore {
         UserDefaults.standard.set(sortAscending, forKey: "fontso.sortAscending")
         UserDefaults.standard.set(searchFields.map(\.rawValue).sorted().joined(separator: ","), forKey: "fontso.searchFields")
         UserDefaults.standard.set(showTrials, forKey: "fontso.showTrials")
+        UserDefaults.standard.set(hideSystem, forKey: "fontso.hideSystem")
     }
 
     func focusSearch() {
@@ -480,7 +483,7 @@ final class LibraryStore {
     }
 
     var visibleFaces: [FontFace] {
-        let key = "\(listRevision)|\(fonts.count)|\(query)|\(searchFields.map(\.rawValue).sorted().joined(separator: ","))|\(showTrials)|\(onlyActive)|\(onlyVariable)|\(onlyLicensed)|\(formatFilter.rawValue)|\(String(describing: filter))\(pinKey)"
+        let key = "\(listRevision)|\(fonts.count)|\(query)|\(searchFields.map(\.rawValue).sorted().joined(separator: ","))|\(showTrials)|\(hideSystem)|\(onlyActive)|\(onlyVariable)|\(onlyLicensed)|\(formatFilter.rawValue)|\(String(describing: filter))\(pinKey)"
         if key == visibleKey { return visibleCache }
         let result = faces(in: filter, query: query)
         visibleKey = key
@@ -493,6 +496,7 @@ final class LibraryStore {
         let trialList: Bool
         if case .category(.trial) = filter { trialList = true } else { trialList = false }
         let suppressTrials = !showTrials && !trialList
+        let suppressSystem = hideSystem
         let terms = SearchScope.terms(in: query)
         let wantActive = onlyActive
         let wantVariable = onlyVariable
@@ -500,6 +504,7 @@ final class LibraryStore {
         let format = formatFilter
         func passes(_ face: FontFace) -> Bool {
             if suppressTrials && isTrial(face) { return false }
+            if suppressSystem && SystemFontLocations.isProtected(face.filePath) { return false }
             if wantActive && !face.activation.isAvailableToApps { return false }
             if wantVariable && !face.isVariable { return false }
             if wantLicensed && !isLicensed(face) { return false }
@@ -524,6 +529,11 @@ final class LibraryStore {
     /// The pinned fonts as part of a cache key, while the Pinned view is open: pinning changes what it shows.
     private var pinKey: String {
         filter == .pinned ? "|" + pinnedIdentities.joined(separator: ",") : ""
+    }
+
+    /// Fonts the search finds anywhere in the library, whatever view is open.
+    func matchingFaces(query: String) -> [FontFace] {
+        faces(in: .all, query: query)
     }
 
     /// How many fonts of the whole library the search finds, whatever view is open. Asked when the open view
@@ -554,7 +564,7 @@ final class LibraryStore {
     }
 
     var activeFilterCount: Int {
-        (showTrials ? 0 : 1) + (onlyActive ? 1 : 0) + (onlyVariable ? 1 : 0) + (onlyLicensed ? 1 : 0)
+        (showTrials ? 0 : 1) + (hideSystem ? 1 : 0) + (onlyActive ? 1 : 0) + (onlyVariable ? 1 : 0) + (onlyLicensed ? 1 : 0)
             + (formatFilter == .any ? 0 : 1)
     }
 
@@ -562,6 +572,7 @@ final class LibraryStore {
     var activeFilterNames: [String] {
         var names: [String] = []
         if !showTrials { names.append("Hide trials") }
+        if hideSystem { names.append("Hide system fonts") }
         if onlyActive { names.append("Only active") }
         if onlyVariable { names.append("Only variable") }
         if onlyLicensed { names.append("Only licensed") }
@@ -571,6 +582,7 @@ final class LibraryStore {
 
     func clearFilters() {
         showTrials = true
+        hideSystem = false
         onlyActive = false
         onlyVariable = false
         onlyLicensed = false

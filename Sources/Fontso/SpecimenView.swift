@@ -250,6 +250,7 @@ struct SpecimenView: View {
     @State private var toggledFamilies: Set<String> = []
     @State private var characterQuery = ""
     @State private var typedQuery = ""
+    @State private var searchWait: Task<Void, Never>?
     @State private var editingOutside: OutsideFont?
     @State private var addingLink = false
     @State private var inspectorHeight: CGFloat = 220
@@ -393,7 +394,12 @@ struct SpecimenView: View {
                 }
                 .paperColors(ink: ink, paper: Color(nsColor: paper))
             } else if faces.isEmpty, store.outsideSelection.isEmpty, viewNarrows {
-                narrowedEmpty
+                let wider = libraryMatches
+                if wider.isEmpty {
+                    narrowedEmpty
+                } else {
+                    widenedSearch(wider)
+                }
             } else if faces.isEmpty && store.outsideSelection.isEmpty {
                 ContentUnavailableView {
                     Text(viewIsList ? "This list is empty" : shownTab == .pinned ? "Nothing pinned yet" : "No fonts here")
@@ -515,6 +521,36 @@ struct SpecimenView: View {
             }
             Spacer(minLength: 0)
         }
+    }
+
+    /// The open view has no hit. Fonts the same search finds elsewhere in the library.
+    private var libraryMatches: [FontFace] {
+        guard !viewQuery.isEmpty, viewFilter != .all else { return [] }
+        return store.matchingFaces(query: viewQuery)
+    }
+
+    /// Matches from the rest of the library, with a way to make that the open view.
+    private func widenedSearch(_ faces: [FontFace]) -> some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Text("No match in \(viewTitle). \(AppChrome.count(faces.count)) \(faces.count == 1 ? "font matches" : "fonts match") in the library.")
+                    .font(AppChrome.type(11))
+                    .foregroundStyle(tone.half)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 8)
+                if own == nil {
+                    Button("Search all fonts") {
+                        store.searchWholeLibrary()
+                    }
+                    .buttonStyle(.chip(on: true))
+                    .help("Open All fonts and keep the search")
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+            specimen(faces)
+        }
+        .paperColors(ink: ink, paper: Color(nsColor: paper))
     }
 
     /// The view has fonts, but the search or a filter holds all of them back. The way out is one click.
@@ -804,16 +840,21 @@ struct SpecimenView: View {
                 .textFieldStyle(.plain)
                 .font(AppChrome.type())
                 .foregroundStyle(tone.ink)
-                .onSubmit { viewQuery = typedQuery }
-                .task(id: typedQuery) {
-                    guard typedQuery != viewQuery else { return }
-                    if typedQuery.isEmpty {
+                .onSubmit {
+                    searchWait?.cancel()
+                    viewQuery = typedQuery
+                }
+                .onChange(of: typedQuery) { _, query in
+                    searchWait?.cancel()
+                    if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                         viewQuery = ""
                         return
                     }
-                    try? await Task.sleep(nanoseconds: 450_000_000)
-                    if !Task.isCancelled, typedQuery != viewQuery {
-                        viewQuery = typedQuery
+                    // A task tied to the view was cancelled before it could commit the query.
+                    searchWait = Task { @MainActor in
+                        try? await Task.sleep(nanoseconds: 200_000_000)
+                        guard !Task.isCancelled else { return }
+                        viewQuery = query
                     }
                 }
                 .onChange(of: viewQuery) { _, query in
@@ -890,6 +931,7 @@ struct SpecimenView: View {
     private var filterMenu: some View {
         Menu {
             Toggle("Hide trials", isOn: Binding(get: { !store.showTrials }, set: { store.showTrials = !$0 }))
+            Toggle("Hide system fonts", isOn: Bindable(store).hideSystem)
             Toggle("Only active", isOn: Bindable(store).onlyActive)
             Toggle("Only variable", isOn: Bindable(store).onlyVariable)
             Toggle("Only licensed", isOn: Bindable(store).onlyLicensed)
@@ -908,7 +950,7 @@ struct SpecimenView: View {
             Text(store.activeFilterCount > 0 ? "Filter · \(store.activeFilterCount)" : "Filter")
         }
         .chromeMenuChip()
-        .help("Hide trials, keep only active, variable, licensed, or a format")
+        .help("Hide trials or system fonts, keep only active, variable, licensed, or a format")
     }
 
     private func specimen(_ faces: [FontFace]) -> some View {
@@ -1208,9 +1250,11 @@ struct SpecimenView: View {
     }
 
     /// A library view with several families starts each one folded to a single sample. A family alone in the
-    /// preview starts open, and so do your own lists, where every cut was picked by hand.
+    /// preview starts open. A list starts folded too, even when it holds one family: the cuts were picked by
+    /// hand, and the arrow beside the name opens them.
     private func opensFamilies(_ groups: [FamilyCluster]) -> Bool {
-        groups.count == 1 || viewKeepsOrder
+        if viewIsList { return false }
+        return groups.count == 1 || viewFilter == .pinned
     }
 
     private func isOpen(_ cluster: FamilyCluster, alone: Bool) -> Bool {

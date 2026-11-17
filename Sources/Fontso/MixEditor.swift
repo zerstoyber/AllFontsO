@@ -137,7 +137,7 @@ struct MixEditor: NSViewRepresentable {
         }
 
         func textDidChange(_ notification: Notification) {
-            guard let view = notification.object as? NSTextView else { return }
+            guard let view = notification.object as? NSTextView, view.window != nil else { return }
             if parent.text != view.string {
                 parent.text = view.string
             }
@@ -145,15 +145,20 @@ struct MixEditor: NSViewRepresentable {
         }
 
         func textViewDidChangeSelection(_ notification: Notification) {
-            guard let view = notification.object as? NSTextView else { return }
+            guard let view = notification.object as? NSTextView, view.window != nil else { return }
             let range = view.selectedRange()
-            DispatchQueue.main.async { self.parent.onSelect(range) }
+            // The text view posts this while it is being torn down, after its block is already gone.
+            DispatchQueue.main.async { [weak view] in
+                guard view?.window != nil else { return }
+                self.parent.onSelect(range)
+            }
         }
 
         func report(_ view: NSTextView) {
-            guard let height = (view as? InkTextView)?.fittedHeight() else { return }
+            guard view.window != nil, let height = (view as? InkTextView)?.fittedHeight() else { return }
             guard abs(parent.measuredHeight - height) > 1 else { return }
-            DispatchQueue.main.async {
+            DispatchQueue.main.async { [weak view] in
+                guard view?.window != nil else { return }
                 self.parent.measuredHeight = height
             }
         }

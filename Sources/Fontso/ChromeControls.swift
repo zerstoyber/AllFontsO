@@ -289,7 +289,7 @@ struct VariableAxesButton: View {
         .help(changed
             ? "The axes of this variable font were changed. Click to adjust or reset them."
             : "Variable font. Click to adjust its axes; the values belong to this font only.")
-        .popover(isPresented: $open, arrowEdge: .bottom) {
+        .popover(isPresented: $open, arrowEdge: .top) {
             VariableAxesPanel(face: face)
         }
     }

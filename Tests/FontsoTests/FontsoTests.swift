@@ -152,6 +152,13 @@ final class FontsoTests: XCTestCase {
         XCTAssertTrue(SearchScope.style.matches(face, query: "regular"))
         XCTAssertTrue(SearchScope.postscript.matches(face, query: "Demo-Regular"))
         XCTAssertTrue(SearchScope.all.matches(face, query: "   "))
+        XCTAssertEqual(TextFold.fold("Times New Roman"), "times new roman")
+        XCTAssertEqual(TextFold.fold("FONTSO"), "fontso")
+        var times = sampleFace(path: "/System/Library/Fonts/Supplemental/Times New Roman.ttf")
+        times.family = "Times New Roman"
+        times.fullName = "Times New Roman"
+        XCTAssertTrue(SearchScope.all.matches(times, query: "times"))
+        XCTAssertTrue(SearchScope.all.matches(times, query: "times\u{200B}"))
     }
 
     func testLibraryChangesIgnoreUntouchedFilesAndMissingFolders() {
