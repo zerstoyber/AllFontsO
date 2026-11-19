@@ -1984,6 +1984,43 @@ final class FontsoTests: XCTestCase {
             activation: .inactive
         )
     }
+
+    func testSuperfamilyNamesTheOtherBranches() {
+        let names = [
+            "ABC Diatype",
+            "ABC Diatype Mono",
+            "ABC Diatype Mono Trial",
+            "ABC Diatype Mono Variable Unlicensed Trial",
+            "ABC Diatype Condensed Unlicensed Trial",
+            "ABC Diatype Semi-Mono Trial",
+            "PT Sans",
+            "PT Serif",
+            "PT Mono",
+            "Noto Sans",
+            "Noto Serif",
+            "Noto Sans Myanmar",
+            "TheSans",
+            "TheSerif",
+            "TheSansMono",
+            "TheMix",
+            "Times",
+            "Times New Roman",
+            "Arial",
+            "Arial Narrow"
+        ]
+        let index = SuperfamilyIndex(families: names)
+        XCTAssertEqual(
+            index.relatives(of: "ABC Diatype Mono Trial"),
+            ["ABC Diatype", "ABC Diatype Condensed Unlicensed Trial", "ABC Diatype Semi-Mono Trial"]
+        )
+        XCTAssertEqual(index.relatives(of: "PT Mono"), ["PT Sans", "PT Serif"])
+        XCTAssertEqual(index.relatives(of: "Noto Sans Myanmar"), [])
+        XCTAssertEqual(Set(index.relatives(of: "Noto Sans")), ["Noto Serif"])
+        XCTAssertEqual(Set(index.relatives(of: "TheSansMono")), ["TheSans", "TheSerif"])
+        XCTAssertFalse(index.relatives(of: "TheMix").contains("TheSans"))
+        XCTAssertEqual(index.relatives(of: "Times"), [])
+        XCTAssertEqual(index.relatives(of: "Arial Narrow"), ["Arial"])
+    }
 }
 
 private extension Data {

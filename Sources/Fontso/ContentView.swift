@@ -32,7 +32,6 @@ struct ContentView: View {
         .onChange(of: store.sortAscending) { _, _ in store.persistPreferences() }
         .onChange(of: store.searchFields) { _, _ in store.persistPreferences() }
         .onChange(of: store.showTrials) { _, _ in store.persistPreferences() }
-        .onChange(of: store.hideSystem) { _, _ in store.persistPreferences() }
         .onChange(of: store.selection) { _, selection in
             guard !selection.isEmpty, !store.outsideSelection.isEmpty else { return }
             switch store.filter {
@@ -726,7 +725,7 @@ struct SidebarView: View {
     }
 
     /// A library view: click for the preview, the chevron for its families.
-    private func viewRow(_ title: String, filter: LibraryFilter, warning: String? = nil, onDrop: (([FontDragItem], DropEdge) -> Bool)? = nil) -> some View {
+    private func viewRow(_ title: String, filter: LibraryFilter, warning: String? = nil, shownInLibrary: Bool? = nil, onEye: (() -> Void)? = nil, onDrop: (([FontDragItem], DropEdge) -> Bool)? = nil) -> some View {
         let count = store.count(filter)
         return SidebarDropRow(
             title: title,
@@ -736,6 +735,8 @@ struct SidebarView: View {
             disclosure: count > 0 ? store.expandedViews.contains(filter) : nil,
             discloseHelp: "the families in \(title)",
             onDisclose: { store.toggleViewFonts(filter) },
+            shownInLibrary: shownInLibrary,
+            onEye: onEye,
             onDrop: onDrop
         )
     }
@@ -761,7 +762,13 @@ struct SidebarView: View {
     }
 
     private func folderRow(_ folder: FontFolder) -> some View {
-        viewRow(folder.displayName, filter: .folder(folder.id))
+        let shown = store.folderIsShown(folder)
+        return viewRow(
+            folder.displayName,
+            filter: .folder(folder.id),
+            shownInLibrary: shown,
+            onEye: { store.toggleFolderShown(folder) }
+        )
             .help(folder.isBuiltIn
                 ? "System fonts from macOS. They stay in the library and cannot be removed."
                 : folder.path)
@@ -1062,6 +1069,9 @@ private struct SidebarDropRow: View {
     /// Rows of the same kind dropped onto the middle go inside this row.
     var allowsInside = false
     var onDisclose: (() -> Void)? = nil
+    /// The eye of a source folder: true while its fonts are mixed into the library.
+    var shownInLibrary: Bool? = nil
+    var onEye: (() -> Void)? = nil
     var onDrop: (([FontDragItem], DropEdge) -> Bool)?
     @State private var targeted = false
     @State private var confirmed = false
@@ -1116,6 +1126,19 @@ private struct SidebarDropRow: View {
                     .help(warning)
             }
             Spacer(minLength: 6)
+            if let shownInLibrary, let onEye {
+                Button(action: onEye) {
+                    Image(systemName: shownInLibrary ? "eye" : "eye.slash")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(shownInLibrary ? AppChrome.half : AppChrome.muted)
+                        .frame(width: 16, height: 16)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help(shownInLibrary
+                    ? "Hide this folder’s fonts in the library. The folder stays here."
+                    : "Show this folder’s fonts in the library again.")
+            }
             if confirmed {
                 Text("Added")
                     .font(AppChrome.small)
@@ -1211,6 +1234,17 @@ private struct SidebarFamilyRow: View {
     var filter: LibraryFilter
     var indent: CGFloat
 
+    /// A drag takes every selected family when this one is part of the selection, otherwise this family.
+    private var sidebarDragIdentities: [String] {
+        let faces = family.faces
+        let ids = Set(faces.map(\.id))
+        if ids.contains(where: { store.selection.contains($0) }), store.selection.count > 1 {
+            let order = store.navigationFamilies(filter).flatMap { $0.faces.map(\.id) }
+            return store.identitiesForDrag(family.lead, order: order)
+        }
+        return faces.map(\.identity)
+    }
+
     var body: some View {
         let faces = family.faces
         let selected = faces.contains { store.selection.contains($0.id) }
@@ -1242,11 +1276,24 @@ private struct SidebarFamilyRow: View {
         .modifier(RowHover(radius: 4))
         .onTapGesture {
             if store.filter != filter { store.filter = filter }
-            store.selectInPreview(family.lead)
+            let picks = store.navigationFamilies(filter).map {
+                LibraryStore.FontPick(anchor: $0.lead.id, ids: $0.faces.map(\.id))
+            }
+            store.choose(LibraryStore.FontPick(anchor: family.lead.id, ids: faces.map(\.id)), in: picks, scroll: true)
         }
-        .draggable(FontDragItem(identities: faces.map(\.identity)))
-        .help("Click to show \(family.name) in the preview and in Info. Drag it onto Pinned, Compare, Shape, or Use.")
+        .draggable(FontDragItem(identities: sidebarDragIdentities))
+        .help("Click to select \(family.name). Command-click adds or removes, Shift-click selects the range. Drag the selection to move it, or onto Pinned, Compare, Shape, or Use.")
         .contextMenu {
+            let acting = store.facesForAction(from: faces)
+            Button(acting.count > 1 ? "Activate \(acting.count)" : "Activate") {
+                store.activate(paths: Array(Set(acting.filter(\.canActivate).map(\.filePath))))
+            }
+            .disabled(!acting.contains(where: \.canActivate))
+            Button(acting.count > 1 ? "Deactivate \(acting.count)" : "Deactivate") {
+                store.deactivate(paths: Array(Set(acting.filter(\.canDeactivate).map(\.filePath))))
+            }
+            .disabled(!acting.contains(where: \.canDeactivate))
+            Divider()
             Button(pinned ? "Unpin" : (faces.count == 1 ? "Pin" : "Pin all \(faces.count) styles")) {
                 if pinned {
                     let identities = Set(faces.map(\.identity))
@@ -1257,10 +1304,10 @@ private struct SidebarFamilyRow: View {
             }
             if case .group(let id) = filter {
                 Button("Remove from list", role: .destructive) {
-                    store.offerFontRemoval(groupID: id, identities: faces.map(\.identity))
+                    store.offerFontRemoval(groupID: id, identities: sidebarDragIdentities)
                 }
             }
-            Button("Send to Use") { store.addToPlayground([family.lead.identity]) }
+            Button("Send to Use") { store.addToPlayground(sidebarDragIdentities) }
         }
     }
 }
@@ -1357,6 +1404,7 @@ struct PaneTitle<Trailing: View>: View {
     @Environment(\.surface) private var surface
 
     var body: some View {
+        VStack(spacing: 0) {
         HStack(spacing: 8) {
             Text(title)
                 .font(AppChrome.type(12, weight: .medium))
@@ -1373,8 +1421,9 @@ struct PaneTitle<Trailing: View>: View {
         }
         .padding(.horizontal, 16)
         .frame(height: 27)
-        .overlay(alignment: .bottom) {
-            Rectangle().fill(surface.hairline).frame(height: 0.5)
+        Rectangle()
+            .fill(surface.ink.opacity(0.22))
+            .frame(height: 0.5)
         }
     }
 }
@@ -1460,7 +1509,7 @@ struct FontsoCommands: Commands {
                 .keyboardShortcut("r")
                 .disabled(store.folders.isEmpty)
             Divider()
-            Button("Sort automatically") { store.sort = .automatic }
+            Button("Sort by family") { store.sort = .family }
                 .keyboardShortcut("g", modifiers: [.command, .shift])
             Button("New list…") { store.showNewGroup = true }
             Button("Shape") { store.openWorkspace(.shape) }

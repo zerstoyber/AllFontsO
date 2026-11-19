@@ -1029,28 +1029,30 @@ struct CutStrip: View {
             if let onChoose {
                 onChoose(face)
             } else {
-                store.selectInPreview(face)
+                let picks = faces.map { LibraryStore.FontPick(anchor: $0.id, ids: [$0.id]) }
+                store.choose(LibraryStore.FontPick(anchor: face.id, ids: [face.id]), in: picks)
             }
         }
-        .draggable(FontDragItem(identities: [face.identity]))
+        .draggable(FontDragItem(identities: pinnedDragIdentities(face)))
         .modifier(CardPlaceDrop(enabled: reorders, gap: large ? 6 : 5) { identities, after in
             place(identities, at: face, after: after)
         })
         .help(
             (onChoose == nil
-                ? "\(face.family) \(face.style). Click to select it; drag it onto a list, a letter, or a text block."
+                ? "\(face.family) \(face.style). Click to select it. Command-click adds or removes, Shift-click selects the range. Drag the selection onto a list, a letter, or a text block."
                 : "\(face.family) \(face.style). Click to make it the reference.")
                 + (moves ? " Drag it onto another pinned font to move it there." : "")
         )
         .contextMenu {
             Button(pinned ? "Unpin" : "Pin") { store.togglePin(face) }
             Button("Show Info") { store.selectInPreview(face, showInfo: true) }
-            Menu("Add to list") {
+            let moving = pinnedDragIdentities(face)
+            Menu(moving.count > 1 ? "Add \(moving.count) fonts to list" : "Add to list") {
                 if store.groups.isEmpty {
                     Button("New list…") { store.showNewGroup = true }
                 }
                 ForEach(store.menuGroups) { group in
-                    Button(store.menuTitle(group)) { store.addToGroup(group.id, identities: [face.identity]) }
+                    Button(store.menuTitle(group)) { store.addToGroup(group.id, identities: moving) }
                 }
             }
             if moves {
@@ -1140,6 +1142,11 @@ struct CutStrip: View {
     }
 
     /// Fonts dropped on a card: in front of it, or behind it when they land on its right half.
+    private func pinnedDragIdentities(_ face: FontFace) -> [String] {
+        guard store.selection.contains(face.id), store.selection.count > 1 else { return [face.identity] }
+        return store.identitiesForDrag(face, order: faces.map(\.id))
+    }
+
     private func place(_ identities: [String], at face: FontFace, after: Bool) -> Bool {
         var target: String? = face.identity
         if after {

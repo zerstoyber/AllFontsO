@@ -226,7 +226,6 @@ struct SpecimenView: View {
     private var leading: Double { get { sizes.leading } nonmutating set { sizes.leading = newValue } }
     @AppStorage("fontso.specimen.unit") private var unitRaw = SpecimenUnit.point.rawValue
     @ObservedObject private var theme = PaperSettings.shared
-    @State private var editorHeights: [Int64: CGFloat] = [:]
     @State private var activeSourcePath = ""
     @AppStorage("fontso.info.metadata") private var metadataOpen = true
     @AppStorage("fontso.info.activation") private var infoOpen = true
@@ -321,16 +320,20 @@ struct SpecimenView: View {
     }
 
     private var viewSort: LibrarySort {
-        get { own?.sort ?? store.sort }
+        get { viewIsList ? store.listSort(of: viewFilter) : (own?.sort ?? store.sort) }
         nonmutating set {
-            if let own { own.sort = newValue } else { store.sort = newValue }
+            if viewIsList { store.setListSort(newValue, of: viewFilter) }
+            else if let own { own.sort = newValue }
+            else { store.sort = newValue }
         }
     }
 
     private var viewAscending: Bool {
-        get { own?.sortAscending ?? store.sortAscending }
+        get { viewIsList ? store.listAscending(of: viewFilter) : (own?.sortAscending ?? store.sortAscending) }
         nonmutating set {
-            if let own { own.sortAscending = newValue } else { store.sortAscending = newValue }
+            if viewIsList { store.setListAscending(newValue, of: viewFilter) }
+            else if let own { own.sortAscending = newValue }
+            else { store.sortAscending = newValue }
         }
     }
 
@@ -880,7 +883,12 @@ struct SpecimenView: View {
 
     private var sortMenu: some View {
         Menu {
-            if viewKeepsOrder {
+            if viewIsList {
+                Section("Order") {
+                    sortChoice(.custom)
+                    ForEach([LibrarySort.family, .foundry, .designer]) { sortChoice($0) }
+                }
+            } else if viewKeepsOrder {
                 Section("Order") {
                     sortChoice(.custom)
                     ForEach(LibrarySort.orderSection) { sortChoice($0) }
@@ -931,7 +939,6 @@ struct SpecimenView: View {
     private var filterMenu: some View {
         Menu {
             Toggle("Hide trials", isOn: Binding(get: { !store.showTrials }, set: { store.showTrials = !$0 }))
-            Toggle("Hide system fonts", isOn: Bindable(store).hideSystem)
             Toggle("Only active", isOn: Bindable(store).onlyActive)
             Toggle("Only variable", isOn: Bindable(store).onlyVariable)
             Toggle("Only licensed", isOn: Bindable(store).onlyLicensed)
@@ -950,7 +957,7 @@ struct SpecimenView: View {
             Text(store.activeFilterCount > 0 ? "Filter · \(store.activeFilterCount)" : "Filter")
         }
         .chromeMenuChip()
-        .help("Hide trials or system fonts, keep only active, variable, licensed, or a format")
+        .help("Hide trials, keep only active, variable, licensed, or a format")
     }
 
     private func specimen(_ faces: [FontFace]) -> some View {
@@ -1885,7 +1892,6 @@ struct SpecimenView: View {
         open: Bool = true,
         leads: Bool = true
     ) -> some View {
-        let height = max(editorHeights[face.id] ?? 120, 44)
         let family = cluster?.faces ?? [face]
         let folded = family.count > 1 && !open
         let selected = store.selection.contains(face.id)
@@ -1911,7 +1917,9 @@ struct SpecimenView: View {
                     .font(AppChrome.type(AppChrome.smallSize + 1, weight: .medium))
                     .foregroundStyle(ink)
                     .lineLimit(1)
-                    .help(count > 1 ? "Drag to change the order, or into the chat or a list" : "Drag this font into the chat or a list")
+                    .help(count > 1
+                        ? "Click to select. Command-click adds or removes, Shift-click selects the range. Drag the selection to move it."
+                        : "Click to select. Command-click adds or removes, Shift-click selects the range. Drag into the chat or a list.")
                 if instances.count > 1 {
                     cutMenu(face, cuts: instances)
                 } else {
@@ -1941,11 +1949,10 @@ struct SpecimenView: View {
                 }
                 .buttonStyle(.chip(on: selected))
                 .help(selected ? "Selected: its Info shows under the navigation" : "Select this cut and show its Info under the navigation")
+                activationControl(for: face, family: family, folded: folded)
                 if folded {
-                    activateAllButton(family)
                     pinAllButton(family)
                 } else {
-                    activationButton(face)
                     playgroundButton(face)
                     pinButton(face)
                 }
@@ -1954,60 +1961,105 @@ struct SpecimenView: View {
             .padding(.top, 7)
             .padding(.bottom, 2)
             .contentShape(Rectangle())
-            .onTapGesture { store.selectInPreview(face, scroll: false) }
+            .onTapGesture {
+                let unit = folded ? family : [face]
+                store.choose(LibraryStore.FontPick(anchor: face.id, ids: unit.map(\.id)), in: previewPicks)
+            }
             .contextMenu {
+                activationMenu(for: face, family: family, folded: folded)
                 if viewIsList {
                     Button("Remove from list", role: .destructive) {
                         offerRemoval(face, family: family, folded: folded)
                     }
                 }
             }
-            .draggable(FontDragItem(identities: [face.identity]))
-            .dropDestination(for: FontDragItem.self) { items, _ in
-                let identities = items.flatMap(\.identities)
-                let shown = Set(viewFaces.map(\.identity))
-                guard identities.contains(where: { shown.contains($0) }) else {
-                    return takeFonts(identities)
-                }
-                reorderPreview(moving: identities, before: face)
-                return true
-            } isTargeted: { _ in }
-            ZStack(alignment: .topLeading) {
-                SpecimenEditor(
-                    text: $specimenText,
-                    face: face,
-                    pointSize: specimenSize,
-                    tracking: tracking * specimenSize,
-                    leading: leading,
-                    textColor: inkNS,
-                    background: ground,
-                    variations: store.axisValues[face.id] ?? [:],
-                    features: featureSettings(face),
-                    measuredHeight: heightBinding(face.id),
-                    onFocus: { store.selectInPreview(face, scroll: false) }
-                )
-                .frame(maxWidth: .infinity, minHeight: height, alignment: .topLeading)
-                if placeholder && specimenText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    Text("Type here")
-                        .foregroundStyle(ink.opacity(0.4))
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                        .allowsHitTesting(false)
+            .draggable(FontDragItem(identities: dragIdentities(face, family: family, folded: folded)))
+            if leads {
+                let related = store.superfamilyNames(around: face.family)
+                if !related.isEmpty {
+                    SuperfamilyLinks(names: related, ink: ink) { name in
+                        store.showFamily(name)
+                    }
                 }
             }
-            .padding(.horizontal, 6)
-            .padding(.bottom, 6)
+            Group {
+                if store.selectionAnchor == face.id {
+                    EditingSample(
+                        text: $specimenText,
+                        face: face,
+                        pointSize: specimenSize,
+                        tracking: tracking * specimenSize,
+                        leading: leading,
+                        textColor: inkNS,
+                        background: ground,
+                        variations: store.axisValues[face.id] ?? [:],
+                        features: featureSettings(face),
+                        placeholder: placeholder && specimenText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                        placeholderInk: ink.opacity(0.4),
+                        onFocus: { store.selectInPreview(face, scroll: false) }
+                    )
+                } else {
+                    FamilySample(face: face, text: specimenText, size: specimenSize)
+                        .foregroundStyle(ink)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            let unit = folded ? family : [face]
+                            store.choose(LibraryStore.FontPick(anchor: face.id, ids: unit.map(\.id)), in: previewPicks)
+                        }
+                }
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         // A plain rectangle: a colour alone as the background comes out with rounded corners on recent macOS,
         // which does not go with the straight lines between the cuts of an open family.
         .background { Rectangle().fill(Color(nsColor: ground)) }
+        .modifier(PreviewReorder(
+            list: viewIsList,
+            shown: Set(viewFaces.map(\.identity)),
+            take: { takeFonts($0) },
+            reorderShown: { reorderPreview(moving: $0, before: face) },
+            reorderList: { items, edge in
+                guard case .group(let id) = viewFilter else { return false }
+                store.reorderList(id, moving: items.flatMap(\.identities), nextTo: family, edge: edge)
+                return true
+            }
+        ))
     }
 
     private func foldedLabel(_ face: FontFace, styles: Int) -> String {
+        if viewIsList { return "\(styles) \(styles == 1 ? "Style" : "Styles")" }
         let category = face.category == .unclassified ? "" : "\(face.category.rawValue), "
         return "\(category)\(styles) Styles"
     }
+
+/// A list shows a line where a dragged font will land. Everywhere else a drop keeps the old behaviour.
+private struct PreviewReorder: ViewModifier {
+    var list: Bool
+    var shown: Set<String>
+    var take: ([String]) -> Bool
+    var reorderShown: ([String]) -> Void
+    var reorderList: ([FontDragItem], DropEdge) -> Bool
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if list {
+            content.modifier(InsertionDrop(
+                isReorder: { _ in true },
+                perform: reorderList
+            ))
+        } else {
+            content.dropDestination(for: FontDragItem.self) { items, _ in
+                let identities = items.flatMap(\.identities)
+                guard identities.contains(where: { shown.contains($0) }) else { return take(identities) }
+                reorderShown(identities)
+                return true
+            }
+        }
+    }
+}
 
     /// Sends this font to the Playground as a new block, set in the current sample text.
     private func playgroundButton(_ face: FontFace) -> some View {
@@ -2045,21 +2097,6 @@ struct SpecimenView: View {
             }
         }
     }
-
-    private func activateAllButton(_ faces: [FontFace]) -> some View {
-        let active = faces.allSatisfy { $0.activation.isAvailableToApps }
-        return Button(active ? "All active" : "Activate all") {
-            if active {
-                store.deactivate(paths: Array(Set(faces.filter(\.canDeactivate).map(\.filePath))))
-            } else {
-                store.activate(paths: Array(Set(faces.filter(\.canActivate).map(\.filePath))))
-            }
-        }
-        .buttonStyle(.chip(on: active))
-        .disabled(!faces.contains { active ? $0.canDeactivate : $0.canActivate })
-        .help(active ? "Every style is available to other apps. Click to deactivate them." : "Activate all \(faces.count) styles so other apps can use them")
-    }
-
 
     /// The pinned fonts over each other, each in its colour. The one clicked among the pinned fonts lies on top
     /// and is the one a drag moves.
@@ -2238,14 +2275,6 @@ struct SpecimenView: View {
                 ? store.selection.compactMap { store.face(id: $0)?.identity }
                 : [face.identity]
         store.offerFontRemoval(groupID: id, identities: pool)
-    }
-
-    private func heightBinding(_ id: Int64) -> Binding<CGFloat> {
-        Binding(
-            // The same start as the card's own, so a sample that happens to measure this is not held for unreported.
-            get: { editorHeights[id] ?? 120 },
-            set: { editorHeights[id] = $0 }
-        )
     }
 
     private var adjustControls: some View {
@@ -2547,6 +2576,18 @@ struct SpecimenView: View {
         InfoGroup("Metadata", isExpanded: $metadataOpen) {
             VStack(alignment: .leading, spacing: 0) {
                 meta("Family", face.family)
+                let related = store.superfamilyNames(around: face.family)
+                if !related.isEmpty {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Superfamily")
+                            .font(AppChrome.type())
+                            .foregroundStyle(ink.opacity(0.5))
+                        SuperfamilyLinks(names: related, ink: ink) { name in
+                            store.showFamily(name)
+                        }
+                    }
+                    .padding(.vertical, 2)
+                }
                 meta("Style", face.style)
                 meta("Full name", face.fullName)
                 meta("PostScript", face.postscriptName)
@@ -2593,12 +2634,13 @@ struct SpecimenView: View {
                     )
                     .help(face.activation.isAvailableToApps ? "Other apps can use this cut" : "Other apps cannot see this cut yet")
                 Spacer()
-                if face.canActivate || face.canDeactivate {
-                    Button(face.canDeactivate ? "Deactivate" : "Activate") {
-                        store.toggle(face)
+                if face.canActivate || face.canDeactivate || store.selection.count > 1 {
+                    let acting = store.facesForAction(from: [face])
+                    Button(activationTitle(acting, single: face)) {
+                        store.toggleActivation(acting)
                     }
                     .buttonStyle(.paper)
-                    .help("Activate makes the font available to other apps; Deactivate removes it again")
+                    .help(activationHelp(acting, single: face))
                 }
             }
             if store.selection.count > 1 {
@@ -2782,17 +2824,97 @@ struct SpecimenView: View {
         }
     }
 
-    private func activationButton(_ face: FontFace) -> some View {
-        let active = face.activation.isAvailableToApps
-        let title = active ? (face.canDeactivate ? "Active" : face.activation.label) : "Activate"
+    /// The rows a Shift-click can reach, in the order the preview shows them. A folded family is one row.
+    private var previewPicks: [LibraryStore.FontPick] {
+        let groups = clusters(viewFaces)
+        let alone = opensFamilies(groups)
+        return groups.flatMap { cluster -> [LibraryStore.FontPick] in
+            let open = isOpen(cluster, alone: alone)
+            if cluster.faces.count > 1, !open {
+                let lead = leadFace(cluster.faces)
+                return [LibraryStore.FontPick(anchor: lead.id, ids: cluster.faces.map(\.id))]
+            }
+            return cluster.faces.map { LibraryStore.FontPick(anchor: $0.id, ids: [$0.id]) }
+        }
+    }
+
+    /// A drag takes the whole selection when this row is part of one, otherwise the row itself.
+    private func dragIdentities(_ face: FontFace, family: [FontFace], folded: Bool) -> [String] {
+        let unit = folded ? family : [face]
+        let ids = Set(unit.map(\.id))
+        if ids.contains(where: { store.selection.contains($0) }), store.selection.count > 1 {
+            return store.identitiesForDrag(face, order: viewFaces.map(\.id))
+        }
+        return unit.map(\.identity)
+    }
+
+    private func activationControl(for face: FontFace, family: [FontFace], folded: Bool) -> some View {
+        let unit = folded ? family : [face]
+        let acting = store.facesForAction(from: unit)
+        let active = acting.allSatisfy { $0.activation.isAvailableToApps }
+        let spread = acting.count != unit.count
+        let title: String
+        if spread {
+            title = active ? "Deactivate \(acting.count)" : "Activate \(acting.count)"
+        } else if unit.count > 1 {
+            title = active ? "All active" : "Activate all"
+        } else {
+            title = active ? (face.canDeactivate ? "Active" : face.activation.label) : "Activate"
+        }
         return Button(title) {
-            store.toggle(face)
+            store.toggleActivation(acting)
         }
         .buttonStyle(.chip(on: active))
-        .disabled(!face.canActivate && !face.canDeactivate)
-        .help(active
-            ? (face.canDeactivate ? "This cut is active. Click to deactivate it." : "This cut is already available to other apps.")
-            : "Activate this file so other apps can use it.")
+        .disabled(!acting.contains { active ? $0.canDeactivate : $0.canActivate })
+        .help(activationHelp(acting, single: face))
+    }
+
+    @ViewBuilder
+    private func activationMenu(for face: FontFace, family: [FontFace], folded: Bool) -> some View {
+        let acting = store.facesForAction(from: folded ? family : [face])
+        let count = acting.count
+        Button(count > 1 ? "Activate \(count)" : "Activate") {
+            store.activate(paths: Array(Set(acting.filter(\.canActivate).map(\.filePath))))
+        }
+        .disabled(!acting.contains(where: \.canActivate))
+        Button(count > 1 ? "Deactivate \(count)" : "Deactivate") {
+            store.deactivate(paths: Array(Set(acting.filter(\.canDeactivate).map(\.filePath))))
+        }
+        .disabled(!acting.contains(where: \.canDeactivate))
+    }
+
+    private func activationHelp(_ acting: [FontFace], single: FontFace) -> String {
+        let active = acting.allSatisfy { $0.activation.isAvailableToApps }
+        if acting.count > 1 {
+            return active
+                ? "Deactivate the \(acting.count) selected fonts."
+                : "Activate the \(acting.count) selected fonts so other apps can use them."
+        }
+        return active
+            ? (single.canDeactivate ? "This cut is active. Click to deactivate it." : "This cut is already available to other apps.")
+            : "Activate this file so other apps can use it."
+    }
+
+    private func activationTitle(_ acting: [FontFace], single: FontFace) -> String {
+        if acting.count > 1 {
+            let active = acting.allSatisfy { $0.activation.isAvailableToApps }
+            return active ? "Deactivate \(acting.count)" : "Activate \(acting.count)"
+        }
+        return single.canDeactivate ? "Deactivate" : "Activate"
+    }
+
+    private func activationButton(_ face: FontFace) -> some View {
+        let acting = store.facesForAction(from: [face])
+        let active = acting.allSatisfy { $0.activation.isAvailableToApps }
+        let title = acting.count > 1
+            ? (active ? "Deactivate \(acting.count)" : "Activate \(acting.count)")
+            : (active ? (face.canDeactivate ? "Active" : face.activation.label) : "Activate")
+        return Button(title) {
+            store.toggleActivation(acting)
+        }
+        .buttonStyle(.chip(on: active))
+        .disabled(!acting.contains { active ? $0.canDeactivate : $0.canActivate })
+        .help(activationHelp(acting, single: face))
     }
 
 
@@ -3080,6 +3202,8 @@ private final class SpecimenTextView: InkTextView {
     override var acceptableDragTypes: [NSPasteboard.PasteboardType] { [] }
 
     var onFocus: (() -> Void)?
+    /// The last drawing inputs applied, so a refresh that changes nothing does not rebuild the line.
+    var drawnKey = ""
 
     /// A click into the sample selects its cut. Reported after the click, so the view update does not interrupt it.
     override func mouseDown(with event: NSEvent) {
@@ -3201,6 +3325,138 @@ extension OutsideFont {
     var nameKey: String { source + "\n" + name }
 }
 
+/// The sample that can be typed in. Only the cut that was just clicked gets one; the others draw a picture.
+private struct EditingSample: View {
+    @Binding var text: String
+    var face: FontFace
+    var pointSize: Double
+    var tracking: Double
+    var leading: Double
+    var textColor: NSColor
+    var background: NSColor
+    var variations: [UInt32: Double]
+    var features: [[CFString: Any]]
+    var placeholder: Bool
+    var placeholderInk: Color
+    var onFocus: () -> Void
+    @State private var height: CGFloat = 120
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            SpecimenEditor(
+                text: $text,
+                face: face,
+                pointSize: pointSize,
+                tracking: tracking,
+                leading: leading,
+                textColor: textColor,
+                background: background,
+                variations: variations,
+                features: features,
+                measuredHeight: $height,
+                onFocus: onFocus
+            )
+            .frame(maxWidth: .infinity, minHeight: max(height, 44), alignment: .topLeading)
+            if placeholder {
+                Text("Type here")
+                    .foregroundStyle(placeholderInk)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .allowsHitTesting(false)
+            }
+        }
+        .padding(.horizontal, 6)
+        .padding(.bottom, 6)
+    }
+}
+
+/// The other branches of a superfamily, named so a Mono can open its Sans or its Condensed.
+private struct SuperfamilyLinks: View {
+    var names: [String]
+    var ink: Color
+    var action: (String) -> Void
+    @State private var expanded = false
+
+    var body: some View {
+        let shown = expanded ? names : Array(names.prefix(6))
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text("Superfamily")
+                    .font(AppChrome.type(10, weight: .medium))
+                    .foregroundStyle(ink.opacity(0.45))
+                if names.count > 6, !expanded {
+                    Button("\(names.count - 6) more") { expanded = true }
+                        .buttonStyle(.plain)
+                        .font(AppChrome.type(10))
+                        .foregroundStyle(ink.opacity(0.7))
+                }
+            }
+            FlowNames(names: shown, ink: ink, action: action)
+        }
+        .padding(.horizontal, 10)
+        .padding(.bottom, names.isEmpty ? 0 : 4)
+    }
+}
+
+/// Names on as many lines as they need, so a long superfamily does not force a sideways scroll.
+private struct FlowNames: View {
+    var names: [String]
+    var ink: Color
+    var action: (String) -> Void
+
+    var body: some View {
+        FlexibleNames(spacing: 4) {
+            ForEach(names, id: \.self) { name in
+                Button(name) { action(name) }
+                    .buttonStyle(.chip())
+                    .font(AppChrome.type(10))
+                    .foregroundStyle(ink.opacity(0.8))
+                    .help("Show \(name), from the same superfamily")
+            }
+        }
+    }
+}
+
+/// Lays buttons out left to right and wraps onto the next line.
+private struct FlexibleNames: Layout {
+    var spacing: CGFloat = 4
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let width = proposal.width ?? 600
+        var x: CGFloat = 0
+        var y: CGFloat = 0
+        var row: CGFloat = 0
+        for view in subviews {
+            let size = view.sizeThatFits(.unspecified)
+            if x > 0, x + size.width > width {
+                x = 0
+                y += row + spacing
+                row = 0
+            }
+            row = max(row, size.height)
+            x += size.width + spacing
+        }
+        return CGSize(width: width, height: y + row)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var x = bounds.minX
+        var y = bounds.minY
+        var row: CGFloat = 0
+        for view in subviews {
+            let size = view.sizeThatFits(.unspecified)
+            if x > bounds.minX, x + size.width > bounds.maxX {
+                x = bounds.minX
+                y += row + spacing
+                row = 0
+            }
+            view.place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(size))
+            row = max(row, size.height)
+            x += size.width + spacing
+        }
+    }
+}
+
 /// Fonts for previews, made from the file itself (and its variation settings). Used by the Playground export too.
 enum SpecimenFont {
     static func make(path: String, index: Int, size: CGFloat, variations: [UInt32: Double], features: [[CFString: Any]] = []) -> NSFont? {
@@ -3225,7 +3481,7 @@ enum SpecimenFont {
                 next = CTFontDescriptorCreateCopyWithAttributes(next, [kCTFontFeatureSettingsAttribute: features] as CFDictionary)
             }
             // Dragging an axis asks for a new descriptor at every step; the store starts over before it grows large.
-            if descriptors.count > 600 { descriptors.removeAll(keepingCapacity: true) }
+            if descriptors.count > 4_000 { descriptors.removeAll(keepingCapacity: true) }
             descriptors[key] = next
             descriptor = next
         }
@@ -3275,7 +3531,12 @@ struct SpecimenEditor: NSViewRepresentable {
     func updateNSView(_ textView: NSTextView, context: Context) {
         context.coordinator.text = $text
         context.coordinator.measuredHeight = $measuredHeight
-        (textView as? SpecimenTextView)?.onFocus = onFocus
+        let specimen = textView as? SpecimenTextView
+        specimen?.onFocus = onFocus
+        let key = drawKey
+        if specimen?.drawnKey == key {
+            return
+        }
         if textView.string != text {
             let selected = textView.selectedRanges
             textView.string = text
@@ -3305,6 +3566,18 @@ struct SpecimenEditor: NSViewRepresentable {
             textView.selectedRanges = selected
         }
         context.coordinator.report(textView)
+        specimen?.drawnKey = key
+    }
+
+    /// What the sample is drawn with. A refresh that changes none of it leaves the text view alone.
+    private var drawKey: String {
+        let color = textColor.usingColorSpace(.sRGB) ?? textColor
+        let paper = background.usingColorSpace(.sRGB) ?? background
+        let axes = variations.keys.sorted().map { "\($0):\(variations[$0] ?? 0)" }.joined(separator: ",")
+        let featureNote = features.map { setting in
+            setting.keys.map { "\($0)" }.sorted().joined(separator: ",")
+        }.joined(separator: "|")
+        return "\(face.id)|\(pointSize)|\(tracking)|\(leading)|\(text)|\(axes)|\(featureNote)|\(color.redComponent),\(color.greenComponent),\(color.blueComponent)|\(paper.redComponent),\(paper.greenComponent),\(paper.blueComponent)"
     }
 
     final class Coordinator: NSObject, NSTextViewDelegate {

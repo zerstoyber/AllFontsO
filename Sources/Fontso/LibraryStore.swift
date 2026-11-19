@@ -214,6 +214,11 @@ enum ShapeMode: String, CaseIterable, Identifiable {
 @Observable
 final class LibraryStore {
     var folders: [FontFolder] = [] { didSet { touchLibrary() } }
+    /// Source folders whose fonts stay out of the library views. The folder itself stays in the navigation.
+    var hiddenFolderPaths: Set<String> = []
+    /// Each list keeps the order it was given. The library's sort does not apply to it.
+    var listSorts: [Int64: LibrarySort] = [:]
+    var listAscendingFlags: [Int64: Bool] = [:]
     /// Lists under News from Foundries.
     var newsLists: [NewsList] = []
     /// Notice ids filed in each news list.
@@ -236,7 +241,6 @@ final class LibraryStore {
     var query = ""
     var showTrials: Bool
     // Each filter bumps the list revision, so the grouped list rebuilds along with the visible faces.
-    var hideSystem = false { didSet { listRevision += 1 } }
     var onlyActive = false { didSet { listRevision += 1 } }
     var onlyVariable = false { didSet { listRevision += 1 } }
     var onlyLicensed = false { didSet { listRevision += 1 } }
@@ -257,7 +261,7 @@ final class LibraryStore {
     /// A font from the news that was clicked under a list in the navigation, shown once that list has opened.
     @ObservationIgnored var pendingOutside: OutsideFont?
     private(set) var countFamilies = UserDefaults.standard.object(forKey: "fontso.countFamilies") as? Bool ?? true
-    @ObservationIgnored private var librarySort: LibrarySort = .automatic
+    @ObservationIgnored private var librarySort: LibrarySort = .family
     var searchFocusToken = 0
     var favoriteKeys: Set<String> = [] { didSet { touchLibrary() } }
     var notes: [String: String] = [:]
@@ -398,10 +402,11 @@ final class LibraryStore {
     @ObservationIgnored private var cancelFlag: CancelFlag?
 
     init() {
-        let stored = UserDefaults.standard.string(forKey: "fontso.sort") ?? LibrarySort.automatic.rawValue
-        let restored = LibrarySort(rawValue: stored) ?? .automatic
-        sort = restored == .custom ? .automatic : restored
-        librarySort = restored == .custom ? .automatic : restored
+        let stored = UserDefaults.standard.string(forKey: "fontso.sort") ?? LibrarySort.family.rawValue
+        let restored = LibrarySort(rawValue: stored) ?? .family
+        let library = (restored == .custom || restored == .automatic) ? .family : restored
+        sort = library
+        librarySort = library
         sortAscending = UserDefaults.standard.object(forKey: "fontso.sortAscending") as? Bool ?? true
         let storedFields = UserDefaults.standard.string(forKey: "fontso.searchFields")
             ?? UserDefaults.standard.string(forKey: "fontso.searchScope")
@@ -409,7 +414,25 @@ final class LibraryStore {
         let fields = Set(storedFields.split(separator: ",").compactMap { SearchScope(rawValue: String($0)) })
         searchFields = fields.isEmpty ? [.all] : fields
         showTrials = UserDefaults.standard.object(forKey: "fontso.showTrials") as? Bool ?? true
-        hideSystem = UserDefaults.standard.object(forKey: "fontso.hideSystem") as? Bool ?? false
+        if let stored = UserDefaults.standard.array(forKey: "fontso.hiddenFolders") as? [String] {
+            hiddenFolderPaths = Set(stored.map(normalizeFontPath))
+        }
+        if let stored = UserDefaults.standard.dictionary(forKey: "fontso.listSorts") as? [String: String] {
+            var sorts: [Int64: LibrarySort] = [:]
+            for (key, value) in stored {
+                guard let id = Int64(key), let item = LibrarySort(rawValue: value) else { continue }
+                sorts[id] = item
+            }
+            listSorts = sorts
+        }
+        if let stored = UserDefaults.standard.dictionary(forKey: "fontso.listAscending") as? [String: Bool] {
+            var directions: [Int64: Bool] = [:]
+            for (key, value) in stored {
+                guard let id = Int64(key) else { continue }
+                directions[id] = value
+            }
+            listAscendingFlags = directions
+        }
         do {
             database = try FontDatabase.live()
         } catch {
@@ -475,7 +498,6 @@ final class LibraryStore {
         UserDefaults.standard.set(sortAscending, forKey: "fontso.sortAscending")
         UserDefaults.standard.set(searchFields.map(\.rawValue).sorted().joined(separator: ","), forKey: "fontso.searchFields")
         UserDefaults.standard.set(showTrials, forKey: "fontso.showTrials")
-        UserDefaults.standard.set(hideSystem, forKey: "fontso.hideSystem")
     }
 
     func focusSearch() {
@@ -483,7 +505,7 @@ final class LibraryStore {
     }
 
     var visibleFaces: [FontFace] {
-        let key = "\(listRevision)|\(fonts.count)|\(query)|\(searchFields.map(\.rawValue).sorted().joined(separator: ","))|\(showTrials)|\(hideSystem)|\(onlyActive)|\(onlyVariable)|\(onlyLicensed)|\(formatFilter.rawValue)|\(String(describing: filter))\(pinKey)"
+        let key = "\(listRevision)|\(fonts.count)|\(query)|\(searchFields.map(\.rawValue).sorted().joined(separator: ","))|\(showTrials)|\(onlyActive)|\(onlyVariable)|\(onlyLicensed)|\(formatFilter.rawValue)|\(hiddenFolderKey)|\(String(describing: filter))\(pinKey)"
         if key == visibleKey { return visibleCache }
         let result = faces(in: filter, query: query)
         visibleKey = key
@@ -496,7 +518,6 @@ final class LibraryStore {
         let trialList: Bool
         if case .category(.trial) = filter { trialList = true } else { trialList = false }
         let suppressTrials = !showTrials && !trialList
-        let suppressSystem = hideSystem
         let terms = SearchScope.terms(in: query)
         let wantActive = onlyActive
         let wantVariable = onlyVariable
@@ -504,7 +525,6 @@ final class LibraryStore {
         let format = formatFilter
         func passes(_ face: FontFace) -> Bool {
             if suppressTrials && isTrial(face) { return false }
-            if suppressSystem && SystemFontLocations.isProtected(face.filePath) { return false }
             if wantActive && !face.activation.isAvailableToApps { return false }
             if wantVariable && !face.isVariable { return false }
             if wantLicensed && !isLicensed(face) { return false }
@@ -564,7 +584,7 @@ final class LibraryStore {
     }
 
     var activeFilterCount: Int {
-        (showTrials ? 0 : 1) + (hideSystem ? 1 : 0) + (onlyActive ? 1 : 0) + (onlyVariable ? 1 : 0) + (onlyLicensed ? 1 : 0)
+        (showTrials ? 0 : 1) + (onlyActive ? 1 : 0) + (onlyVariable ? 1 : 0) + (onlyLicensed ? 1 : 0)
             + (formatFilter == .any ? 0 : 1)
     }
 
@@ -572,7 +592,6 @@ final class LibraryStore {
     var activeFilterNames: [String] {
         var names: [String] = []
         if !showTrials { names.append("Hide trials") }
-        if hideSystem { names.append("Hide system fonts") }
         if onlyActive { names.append("Only active") }
         if onlyVariable { names.append("Only variable") }
         if onlyLicensed { names.append("Only licensed") }
@@ -582,7 +601,6 @@ final class LibraryStore {
 
     func clearFilters() {
         showTrials = true
-        hideSystem = false
         onlyActive = false
         onlyVariable = false
         onlyLicensed = false
@@ -724,7 +742,7 @@ final class LibraryStore {
         } else if wasList, sort == .custom {
             sort = librarySort
         } else if sort == .custom {
-            sort = .automatic
+            sort = .family
         }
         switch new {
         case .research, .news:
@@ -1031,10 +1049,17 @@ final class LibraryStore {
     }
 
     /// The fonts of a view in families, in the order the sort asks for. A list and the pinned fonts have an
-    /// order of their own.
+    /// order of their own. A list is never split into the categories, which already have their own rows.
     private func grouped(_ faces: [FontFace], of filter: LibraryFilter, sort: LibrarySort, ascending: Bool) -> [BrowseGroup] {
+        var applied = sort
+        var direction = ascending
+        if case .group(let id) = filter {
+            applied = listSorts[id] ?? .custom
+            if applied == .automatic { applied = .family }
+            if let flag = listAscendingFlags[id] { direction = flag }
+        }
         var customOrder: [String] = []
-        if sort == .custom, case .group(let id) = filter {
+        if applied == .custom, case .group(let id) = filter {
             // The list's own order first, then each sub-list's order in sidebar order.
             var seen: Set<String> = []
             for member in listScope(id) {
@@ -1042,10 +1067,80 @@ final class LibraryStore {
                     customOrder.append(key)
                 }
             }
-        } else if sort == .custom, filter == .pinned {
+        } else if applied == .custom, filter == .pinned {
             customOrder = pinnedIdentities
         }
-        return FontGrouping.browseGroups(faces: faces, sort: sort, ascending: ascending, customOrder: customOrder)
+        return FontGrouping.browseGroups(faces: faces, sort: applied, ascending: direction, customOrder: customOrder)
+    }
+
+    /// The sort a list shows. Other views use the library's sort.
+    func listSort(of filter: LibraryFilter) -> LibrarySort {
+        guard case .group(let id) = filter else { return sort }
+        let item = listSorts[id] ?? .custom
+        return item == .automatic ? .family : item
+    }
+
+    func setListSort(_ next: LibrarySort, of filter: LibraryFilter) {
+        guard case .group(let id) = filter else {
+            sort = next
+            return
+        }
+        listSorts[id] = next == .automatic ? .family : next
+        persistListArrangement()
+        listRevision += 1
+    }
+
+    func listAscending(of filter: LibraryFilter) -> Bool {
+        guard case .group(let id) = filter else { return sortAscending }
+        return listAscendingFlags[id] ?? true
+    }
+
+    func setListAscending(_ next: Bool, of filter: LibraryFilter) {
+        guard case .group(let id) = filter else {
+            sortAscending = next
+            return
+        }
+        listAscendingFlags[id] = next
+        persistListArrangement()
+        listRevision += 1
+    }
+
+    private func persistListArrangement() {
+        let sorts = Dictionary(uniqueKeysWithValues: listSorts.map { (String($0.key), $0.value.rawValue) })
+        let directions = Dictionary(uniqueKeysWithValues: listAscendingFlags.map { (String($0.key), $0.value) })
+        UserDefaults.standard.set(sorts, forKey: "fontso.listSorts")
+        UserDefaults.standard.set(directions, forKey: "fontso.listAscending")
+    }
+
+    /// Whether a source folder's fonts are mixed into the library views.
+    func folderIsShown(_ folder: FontFolder) -> Bool {
+        !hiddenFolderPaths.contains(normalizeFontPath(folder.path))
+    }
+
+    func toggleFolderShown(_ folder: FontFolder) {
+        let path = normalizeFontPath(folder.path)
+        if hiddenFolderPaths.contains(path) {
+            hiddenFolderPaths.remove(path)
+        } else {
+            hiddenFolderPaths.insert(path)
+        }
+        UserDefaults.standard.set(Array(hiddenFolderPaths), forKey: "fontso.hiddenFolders")
+        listRevision += 1
+    }
+
+    private var hiddenFolderKey: String {
+        hiddenFolderPaths.sorted().joined(separator: ",")
+    }
+
+    /// A font from a folder whose eye is closed stays out of the mixed library. The folder's own row still shows it.
+    private func folderContributes(_ face: FontFace) -> Bool {
+        guard !hiddenFolderPaths.isEmpty else { return true }
+        for folder in folders {
+            let path = normalizeFontPath(folder.path)
+            guard hiddenFolderPaths.contains(path) else { continue }
+            if face.filePath == path || face.filePath.hasPrefix(path + "/") { return false }
+        }
+        return true
     }
 
     // MARK: Previews of their own
@@ -1057,7 +1152,7 @@ final class LibraryStore {
         if let known = scopes[source] { return known }
         let own: Bool
         if case .group = source { own = true } else { own = source == .pinned }
-        let made = PreviewScope(source: source, sort: own ? .custom : (sort == .custom ? .automatic : sort))
+        let made = PreviewScope(source: source, sort: own ? .custom : ((sort == .custom || sort == .automatic) ? .family : sort))
         scopes[source] = made
         return made
     }
@@ -1514,14 +1609,71 @@ final class LibraryStore {
         pinnedIdentities.removeAll { $0 == face.identity }
     }
 
+    /// One clickable row and the cuts it stands for. A folded family is one row for every style.
+    struct FontPick {
+        var anchor: Int64
+        var ids: [Int64]
+    }
+
+    /// Where a Shift-click starts its range.
+    @ObservationIgnored var selectionAnchor: Int64?
+
     /// Highlights a cut and scrolls the stacked preview to it. Its Info shows under the navigation when that
     /// panel is open; only asking for Info by name opens a folded one.
     func selectInPreview(_ face: FontFace, scroll: Bool = true, showInfo: Bool = false) {
         selection = [face.id]
+        selectionAnchor = face.id
+        outsideSelection = []
         keyTarget = .font
         if showInfo { infoPanelOpen = true }
         if scroll {
             focusPreviewID = face.id
+        }
+    }
+
+    /// Click selects the row. Command-click adds or removes it. Shift-click selects every row from the last
+    /// click through this one. A row can stand for several cuts, and those stay together.
+    func choose(_ pick: FontPick, in picks: [FontPick], scroll: Bool = false) {
+        let flags = NSEvent.modifierFlags
+        keyTarget = .font
+        outsideSelection = []
+        if flags.contains(.shift),
+           let anchor = selectionAnchor,
+           let from = picks.firstIndex(where: { $0.anchor == anchor || $0.ids.contains(anchor) }),
+           let to = picks.firstIndex(where: { $0.anchor == pick.anchor }) {
+            let ids = Set(picks[min(from, to)...max(from, to)].flatMap(\.ids))
+            selection = flags.contains(.command) ? selection.union(ids) : ids
+        } else if flags.contains(.command) {
+            let ids = Set(pick.ids)
+            if ids.isSubset(of: selection) {
+                selection.subtract(ids)
+            } else {
+                selection.formUnion(ids)
+            }
+            selectionAnchor = pick.anchor
+        } else {
+            selection = Set(pick.ids)
+            selectionAnchor = pick.anchor
+        }
+        if scroll, let first = pick.ids.first {
+            focusPreviewID = first
+        }
+    }
+
+    /// The cuts an Activate or Deactivate button should reach: the whole selection when this row is part of a larger one.
+    func facesForAction(from faces: [FontFace]) -> [FontFace] {
+        let ids = Set(faces.map(\.id))
+        guard !ids.isEmpty, ids.isSubset(of: selection), selection.count > ids.count else { return faces }
+        return fonts.filter { selection.contains($0.id) }
+    }
+
+    /// Activates every cut that is off, or deactivates them all when every one is already on.
+    func toggleActivation(_ faces: [FontFace]) {
+        guard !faces.isEmpty else { return }
+        if faces.allSatisfy({ $0.activation.isAvailableToApps }) {
+            deactivate(paths: Array(Set(faces.filter(\.canDeactivate).map(\.filePath))))
+        } else {
+            activate(paths: Array(Set(faces.filter(\.canActivate).map(\.filePath))))
         }
     }
 
@@ -1707,7 +1859,7 @@ final class LibraryStore {
                 byFamily[key].map { NavigationFamily(name: $0[0].family, faces: $0) }
             }
         }
-        let token = "\(contentRevision)|\(fonts.count)|\(favoriteKeys.count)|\(licenses.count)|\(standardMembership.count)|\(folders.count)"
+        let token = "\(contentRevision)|\(fonts.count)|\(favoriteKeys.count)|\(licenses.count)|\(standardMembership.count)|\(folders.count)|\(hiddenFolderKey)"
         if token != navigationFamilyToken {
             navigationFamilyCache = [:]
             navigationFamilyToken = token
@@ -1802,7 +1954,7 @@ final class LibraryStore {
     }
 
     private func refreshCounts() {
-        let token = "\(contentRevision)|\(favoriteKeys.count)|\(licenses.count)|\(standardMembership.count)|\(membership.count)|\(folders.count)"
+        let token = "\(contentRevision)|\(favoriteKeys.count)|\(licenses.count)|\(standardMembership.count)|\(membership.count)|\(folders.count)|\(hiddenFolderKey)"
         if token != countToken {
             countCache = tallyCounts()
             countToken = token
@@ -1818,20 +1970,23 @@ final class LibraryStore {
             func note(_ filter: LibraryFilter) {
                 counts[filter, default: CountTally()].add(family: family)
             }
-            note(.all)
-            if face.activation.isAvailableToApps { note(.available) }
-            if face.activation == .inactive { note(.inactive) }
-            if face.isVariable { note(.variable) }
-            if face.isWebfont { note(.webfonts) } else { note(.desktop) }
-            if favoriteKeys.contains(identity) { note(.favorites) }
-            if licenses[identity] != nil { note(.licensed) }
-            let listed = standardMembership[identity] ?? listedCategories(face)
-            var typed = false
-            for category in listed where category != .unclassified {
-                note(.category(category))
-                if category != .trial { typed = true }
+            let shown = folderContributes(face)
+            if shown {
+                note(.all)
+                if face.activation.isAvailableToApps { note(.available) }
+                if face.activation == .inactive { note(.inactive) }
+                if face.isVariable { note(.variable) }
+                if face.isWebfont { note(.webfonts) } else { note(.desktop) }
+                if favoriteKeys.contains(identity) { note(.favorites) }
+                if licenses[identity] != nil { note(.licensed) }
+                let listed = standardMembership[identity] ?? listedCategories(face)
+                var typed = false
+                for category in listed where category != .unclassified {
+                    note(.category(category))
+                    if category != .trial { typed = true }
+                }
+                if !typed { note(.category(.unclassified)) }
             }
-            if !typed { note(.category(.unclassified)) }
             for (id, path, prefix) in folderPrefixes where face.filePath == path || face.filePath.hasPrefix(prefix) {
                 note(.folder(id))
             }
@@ -2400,25 +2555,25 @@ final class LibraryStore {
     private func matches(_ filter: LibraryFilter, face: FontFace) -> Bool {
         switch filter {
         case .all:
-            return true
+            return folderContributes(face)
         case .available:
-            return face.activation.isAvailableToApps
+            return folderContributes(face) && face.activation.isAvailableToApps
         case .inactive:
-            return face.activation == .inactive
+            return folderContributes(face) && face.activation == .inactive
         case .variable:
-            return face.isVariable
+            return folderContributes(face) && face.isVariable
         case .webfonts:
-            return face.isWebfont
+            return folderContributes(face) && face.isWebfont
         case .desktop:
-            return !face.isWebfont
+            return folderContributes(face) && !face.isWebfont
         case .favorites:
-            return favoriteKeys.contains(face.identity)
+            return folderContributes(face) && favoriteKeys.contains(face.identity)
         case .pinned:
             return pinnedIdentities.contains(face.identity)
         case .licensed:
-            return isLicensed(face)
+            return folderContributes(face) && isLicensed(face)
         case .category(let category):
-            return isInStandardList(category, face)
+            return folderContributes(face) && isInStandardList(category, face)
         case .folder(let id):
             guard let folder = folders.first(where: { $0.id == id }) else { return false }
             return face.filePath == folder.path || face.filePath.hasPrefix(folder.path + "/")
@@ -2469,6 +2624,35 @@ final class LibraryStore {
             familyIndexRevision = fontsRevision
         }
         return familyIndex[family.lowercased()] ?? []
+    }
+
+    @ObservationIgnored private var superfamilyRevision = -1
+    @ObservationIgnored private var superfamilyIndex = SuperfamilyIndex(families: [])
+
+    /// The other branches of this family: the Sans and the Condensed when this one is the Mono.
+    func superfamilyNames(around family: String) -> [String] {
+        if superfamilyRevision != fontsRevision {
+            var seen = Set<String>()
+            var names: [String] = []
+            names.reserveCapacity(fonts.count / 8)
+            for face in fonts where seen.insert(face.family.lowercased()).inserted {
+                names.append(face.family)
+            }
+            superfamilyIndex = SuperfamilyIndex(families: names)
+            superfamilyRevision = fontsRevision
+        }
+        return superfamilyIndex.relatives(of: family)
+    }
+
+    /// Narrows the preview to one family and selects its regular cut.
+    func showFamily(_ name: String) {
+        let cuts = cuts(in: name)
+        guard let face = cuts.min(by: { lhs, rhs in
+            if lhs.isItalic != rhs.isItalic { return !lhs.isItalic }
+            return abs(lhs.weightClass - 400) < abs(rhs.weightClass - 400)
+        }) ?? cuts.first else { return }
+        query = name
+        selectInPreview(face)
     }
 
     func isFavorite(_ face: FontFace) -> Bool {
@@ -3971,7 +4155,13 @@ final class LibraryStore {
 
     /// Moves fonts in the open list so they sit directly above or below the given family. Fonts new to the list are added there.
     func reorderList(moving identities: [String], nextTo faces: [FontFace], edge: DropEdge) {
-        guard case .group(let groupID) = filter, let database else { return }
+        guard case .group(let groupID) = filter else { return }
+        reorderList(groupID, moving: identities, nextTo: faces, edge: edge)
+    }
+
+    /// Moves fonts in one list, whether or not that list is the one open in the main window.
+    func reorderList(_ groupID: Int64, moving identities: [String], nextTo faces: [FontFace], edge: DropEdge) {
+        guard let database else { return }
         let known = Set(fonts.map(\.identity))
         var seen = Set<String>()
         let moving = identities.filter { known.contains($0) && seen.insert($0).inserted }
@@ -4000,7 +4190,8 @@ final class LibraryStore {
             order.insert(contentsOf: moving, at: insertAt)
             try database.setMemberOrder(groupID: groupID, keys: order)
             listOrder[groupID] = order
-            sort = .custom
+            listSorts[groupID] = .custom
+            persistListArrangement()
             touchLibrary()
         } catch {
             alertMessage = error.localizedDescription
@@ -4077,9 +4268,12 @@ final class LibraryStore {
 
     /// What a drag from this row carries: the whole selection when the row is part of it, else the row itself.
     /// With `wholeFile`, a variable instance brings every named instance of its file along.
-    func identitiesForDrag(_ face: FontFace, wholeFile: Bool = false) -> [String] {
+    func identitiesForDrag(_ face: FontFace, wholeFile: Bool = false, order: [Int64] = []) -> [String] {
         if selection.contains(face.id) {
-            let selected = fonts.filter { selection.contains($0.id) }
+            let picked = order.filter { selection.contains($0) }
+            let selected = picked.count == selection.count
+                ? picked.compactMap { self.face(id: $0) }
+                : fonts.filter { selection.contains($0.id) }
             if !selected.isEmpty {
                 return wholeFile ? widenToFiles(selected) : selected.map(\.identity)
             }

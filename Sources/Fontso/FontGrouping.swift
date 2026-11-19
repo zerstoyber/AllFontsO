@@ -41,7 +41,7 @@ enum LibrarySort: String, CaseIterable, Identifiable {
     }
 
     /// Menu sections: how the fonts are ordered, what their letterforms measure, and what the files record.
-    static let orderSection: [LibrarySort] = [.automatic, .family, .foundry, .designer]
+    static let orderSection: [LibrarySort] = [.family, .foundry, .designer]
     static let letterformSection: [LibrarySort] = [.xHeight, .capHeight, .letterWidth, .contrast]
     static let fileSection: [LibrarySort] = [.format, .status, .scripts, .version, .fileDate, .added]
 
@@ -69,7 +69,7 @@ enum LibrarySort: String, CaseIterable, Identifiable {
 
     var hint: String {
         switch self {
-        case .automatic: return "Category, then family. Styles by weight."
+        case .automatic: return "Alphabetical by family name."
         case .family: return "Alphabetical by family name."
         case .foundry: return "Grouped by foundry."
         case .designer: return "Grouped by designer."
@@ -189,14 +189,7 @@ enum FontGrouping {
     ) -> [BrowseGroup] {
         let families = families(from: faces)
         switch sort {
-        case .automatic:
-            let buckets = Dictionary(grouping: families) { $0.representative.category }
-            let ordered = FontCategory.allCases.compactMap { category -> BrowseGroup? in
-                guard let items = buckets[category], !items.isEmpty else { return nil }
-                return BrowseGroup(id: category.rawValue, title: category.rawValue, families: sortFamilies(items, ascending: ascending))
-            }
-            return ascending ? ordered : ordered.reversed()
-        case .family:
+        case .automatic, .family:
             return [BrowseGroup(id: "family", title: "", families: sortFamilies(families, ascending: ascending))]
         case .foundry:
             return grouped(families, missing: "Unknown foundry", ascending: ascending) { $0.representative.manufacturer }
@@ -400,7 +393,7 @@ enum FontGrouping {
     static func sections(faces: [FontFace], sort: LibrarySort, ascending: Bool) -> [FontSection] {
         switch sort {
         case .automatic, .family:
-            return familySections(faces, showCategory: true, orderByCategory: sort == .automatic, ascending: ascending)
+            return familySections(faces, showCategory: false, orderByCategory: false, ascending: ascending)
         case .foundry:
             return keyedSections(faces, missing: "Unknown foundry", rowStyle: .family, ascending: ascending) { $0.manufacturer }
         case .designer:
